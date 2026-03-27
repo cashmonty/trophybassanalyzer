@@ -1,0 +1,42 @@
+[project]
+name = "trophy-bass-analyzer"
+version = "0.1.0"
+description = "Indiana Trophy Largemouth Bass Fishing Dashboard"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx[http2]>=0.27",
+    "pandas>=2.2",
+    "polars>=1.0",
+    "duckdb>=1.0",
+    "pyarrow>=17.0",
+    "diskcache>=5.6",
+    "lightgbm>=4.5",
+    "scikit-learn>=1.5",
+    "statsmodels>=0.14",
+    "scipy>=1.14",
+    "ephem>=4.1",
+    "streamlit>=1.38",
+    "plotly>=5.24",
+    "folium>=0.17",
+    "streamlit-folium>=0.22",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

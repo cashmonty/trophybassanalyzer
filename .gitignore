@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.env
+.deploy/
+.claude/
+usabassin_monroe_raw.csv
+
+# Data files (large, fetched by scripts)
+data/raw/
+data/cache/
+data/models/
+data/processed/*
+
+# Keep directory structure
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/cache/.gitkeep
+!data/processed/catches.parquet
+!data/processed/merged.parquet
+!data/processed/predictions_2026.parquet
+!data/processed/predictions_2026_hourly.parquet
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml

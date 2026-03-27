@@ -1,0 +1,70 @@
+lakes:
+  monroe:
+    name: "Lake Monroe"
+    lat: 39.0336
+    lon: -86.5225
+    usgs_station: "03372500"
+    state: IN
+    max_depth_ft: 55
+    avg_depth_ft: 15
+    notes: "Largest lake in Indiana, 10,750 acres. Best structure: standing timber, creek channels, points. State record potential."
+
+  patoka:
+    name: "Patoka Lake"
+    lat: 38.4150
+    lon: -86.6550
+    usgs_station: "03374100"
+    state: IN
+    max_depth_ft: 60
+    avg_depth_ft: 18
+    notes: "8,800 acres, Dubois/Orange/Crawford counties. Clear water, excellent trophy genetics. Multiple 10+ lb fish documented."
+
+  brookville:
+    name: "Brookville Lake"
+    lat: 39.4300
+    lon: -85.0150
+    usgs_station: "03276500"
+    state: IN
+    max_depth_ft: 100
+    avg_depth_ft: 22
+    notes: "5,260 acres, deep clear reservoir. Strong trophy smallmouth AND largemouth. Steep bluff banks, deep timber."
+
+  geist:
+    name: "Geist Reservoir"
+    lat: 39.8867
+    lon: -85.9506
+    usgs_station: "03351500"
+    state: IN
+    max_depth_ft: 32
+    avg_depth_ft: 10
+    notes: "1,890 acres, Indianapolis metro. Shallow fertile reservoir, grass beds develop summer."
+
+  lemon:
+    name: "Lake Lemon"
+    lat: 39.2150
+    lon: -86.5050
+    usgs_station: null
+    state: IN
+    max_depth_ft: 28
+    avg_depth_ft: 8
+    notes: "1,650 acres, near Bloomington. Productive stained water, brush piles, laydowns."
+
+  morse:
+    name: "Morse Reservoir"
+    lat: 40.0750
+    lon: -86.0250
+    usgs_station: "03349210"
+    state: IN
+    max_depth_ft: 25
+    avg_depth_ft: 9
+    notes: "1,500 acres, Hamilton County. Shallow power-fishing lake, docks and riprap."
+
+# Data collection settings
+settings:
+  start_year: 2011
+  end_year: 2025
+  timezone: "America/Indiana/Indianapolis"
+  # Trophy = Indiana Master Angler threshold for largemouth (8 lbs)
+  # 7 lbs is "quality trophy" — still a fish of a lifetime for most
+  trophy_weight_lbs: 7.0
+  super_trophy_weight_lbs: 10.0
