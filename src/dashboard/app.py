@@ -17,6 +17,7 @@ for candidate in Path(__file__).resolve().parents:
             sys.path.insert(0, candidate_str)
         break
 
+from src.config import DATA_DIR
 from src.dashboard.ui import (
     MONTH_NAMES,
     bootstrap_dashboard,
@@ -215,9 +216,206 @@ with brief_cols[2]:
             "Daily 2026 windows are not available yet for the current lake selection.",
         )
 
-tab_patterns, tab_conditions, tab_predictions = st.tabs(
-    ["Pattern Board", "Water and Weather", "2026 Windows"]
+tab_thisweek, tab_patterns, tab_conditions, tab_predictions = st.tabs(
+    ["This Week", "Pattern Board", "Water and Weather", "2026 Windows"]
 )
+
+with tab_thisweek:
+    st.subheader("7-Day Live Trophy Bass Forecast")
+
+    # Load or generate live forecast
+    live_daily_path = Path(DATA_DIR) / "processed" / "live_forecast_daily.parquet"
+    live_hourly_path = Path(DATA_DIR) / "processed" / "live_forecast_hourly.parquet"
+
+    def _load_live_forecast():
+        if live_daily_path.exists() and live_hourly_path.exists():
+            daily = pd.read_parquet(live_daily_path)
+            hourly = pd.read_parquet(live_hourly_path)
+            # Check if data is stale (older than 6 hours)
+            if len(hourly) > 0:
+                first_dt = pd.to_datetime(hourly["datetime"].iloc[0])
+                if (pd.Timestamp.now() - first_dt).total_seconds() < 6 * 3600:
+                    return daily, hourly
+            return daily, hourly
+        return None, None
+
+    live_daily, live_hourly = _load_live_forecast()
+
+    if live_daily is None or live_daily.empty:
+        st.warning("No live forecast data available. Generating now...")
+        with st.spinner("Fetching weather forecasts and computing solunar data..."):
+            from src.analysis.live_forecast import generate_live_forecast
+            live_daily = generate_live_forecast()
+            if live_hourly_path.exists():
+                live_hourly = pd.read_parquet(live_hourly_path)
+            else:
+                live_hourly = None
+
+    if live_daily is not None and not live_daily.empty:
+        # Filter to selected lakes
+        live_daily_filtered = live_daily[live_daily["lake_key"].isin(ctx.selected_lakes)].copy()
+        live_hourly_filtered = (
+            live_hourly[live_hourly["lake_key"].isin(ctx.selected_lakes)].copy()
+            if live_hourly is not None else None
+        )
+
+        if live_daily_filtered.empty:
+            st.info("No forecast data for selected lakes.")
+        else:
+            # Refresh button
+            if st.button("Refresh Forecast", type="primary"):
+                with st.spinner("Fetching latest weather data..."):
+                    from src.analysis.live_forecast import generate_live_forecast
+                    live_daily = generate_live_forecast()
+                    live_daily_filtered = live_daily[live_daily["lake_key"].isin(ctx.selected_lakes)].copy()
+                    if live_hourly_path.exists():
+                        live_hourly = pd.read_parquet(live_hourly_path)
+                        live_hourly_filtered = live_hourly[live_hourly["lake_key"].isin(ctx.selected_lakes)].copy()
+                    st.rerun()
+
+            # Top picks banner
+            top3 = live_daily_filtered.nlargest(3, "max_score")
+            pick_cols = st.columns(3)
+            for i, (_, pick) in enumerate(top3.iterrows()):
+                with pick_cols[i]:
+                    lake_name = lake_label(pick["lake_key"], ctx.lake_configs)
+                    day_name = pd.Timestamp(pick["date"]).strftime("%A %b %d")
+                    best_hr = int(pick["best_hour"])
+                    ampm = "AM" if best_hr < 12 else "PM"
+                    hr12 = best_hr % 12 or 12
+                    rating = str(pick.get("rating", ""))
+                    moon = pick.get("moon_phase_name", "")
+                    render_pattern_note(
+                        f"#{i+1}: {lake_name}",
+                        f"{day_name} at {hr12}{ampm} - Score {pick['max_score']:.0f} ({rating}). Moon: {moon}",
+                    )
+
+            st.markdown("---")
+
+            # Daily breakdown
+            for d in sorted(live_daily_filtered["date"].unique()):
+                day_data = live_daily_filtered[live_daily_filtered["date"] == d].sort_values("max_score", ascending=False)
+                day_name = pd.Timestamp(d).strftime("%A, %B %d")
+                moon = day_data.iloc[0].get("moon_phase_name", "")
+                moon_illum = day_data.iloc[0].get("moon_illumination", 0)
+                if pd.isna(moon_illum):
+                    moon_illum = 0
+
+                # Solunar periods from hourly
+                solunar_html = ""
+                if live_hourly_filtered is not None:
+                    day_hrs = live_hourly_filtered[live_hourly_filtered["date"] == d]
+                    if len(day_hrs) > 0:
+                        first = day_hrs.iloc[0]
+                        periods = []
+                        for prefix, label in [("major_period_1", "Major"), ("major_period_2", "Major"),
+                                              ("minor_period_1", "Minor"), ("minor_period_2", "Minor")]:
+                            s = first.get(f"{prefix}_start")
+                            e = first.get(f"{prefix}_end")
+                            if s is not None and not pd.isna(s):
+                                try:
+                                    s_fmt = pd.Timestamp(s).strftime("%I:%M%p").lstrip("0").lower()
+                                    e_fmt = pd.Timestamp(e).strftime("%I:%M%p").lstrip("0").lower()
+                                    periods.append(f"{label}: {s_fmt}-{e_fmt}")
+                                except Exception:
+                                    pass
+                        if periods:
+                            solunar_html = " | ".join(periods)
+
+                best_score = day_data["max_score"].max()
+                if best_score >= 80:
+                    score_color = ctx.colors["trophy_gold"]
+                elif best_score >= 65:
+                    score_color = ctx.colors["bass_green"]
+                else:
+                    score_color = ctx.colors["fog"]
+
+                st.markdown(
+                    f"""
+                    <div style="background: rgba(255,253,252,0.7); border: 1px solid rgba(23,35,28,0.08);
+                         border-radius: 18px; padding: 1rem 1.2rem; margin-bottom: 0.8rem;
+                         border-left: 5px solid {score_color};">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <strong style="font-family: Rockwell, Georgia, serif; font-size: 1.1rem;">
+                                    {day_name}
+                                </strong>
+                                <span style="margin-left: 1rem; color: #666;">
+                                    Moon: {moon} ({moon_illum*100:.0f}%)
+                                </span>
+                            </div>
+                            <div style="font-family: Rockwell, Georgia, serif; font-size: 1.3rem; color: {score_color};">
+                                {best_score:.0f}
+                            </div>
+                        </div>
+                        {"<div style='color: #888; font-size: 0.85rem; margin-top: 0.3rem;'>" + solunar_html + "</div>" if solunar_html else ""}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                # Lake rows for this day
+                lake_cols_data = []
+                for _, row in day_data.iterrows():
+                    lake_name = lake_label(row["lake_key"], ctx.lake_configs)
+                    air_hi_f = row["air_temp_high"] * 9 / 5 + 32
+                    air_lo_f = row["air_temp_low"] * 9 / 5 + 32
+                    wind_mph = row["wind_avg"] * 0.621371
+                    gust_mph = row["wind_max"] * 0.621371
+                    precip_in = row["precip_total"] / 25.4
+                    best_hr = int(row["best_hour"])
+                    ampm = "AM" if best_hr < 12 else "PM"
+                    hr12 = best_hr % 12 or 12
+                    lake_cols_data.append({
+                        "Lake": lake_name,
+                        "Score": f"{row['max_score']:.0f}",
+                        "Rating": str(row.get("rating", "")),
+                        "Best Hour": f"{hr12}{ampm}",
+                        "Water F": f"{row['water_temp_f_avg']:.0f}",
+                        "Hi/Lo F": f"{air_hi_f:.0f}/{air_lo_f:.0f}",
+                        "Wind mph": f"{wind_mph:.0f}",
+                        "Gust mph": f"{gust_mph:.0f}",
+                        "Cloud %": f"{row['cloud_avg']:.0f}",
+                        "Rain in": f"{precip_in:.2f}",
+                        "Wind Dir": str(row.get("dominant_wind", "")),
+                    })
+
+                day_table = pd.DataFrame(lake_cols_data)
+                render_dataframe(day_table, hide_index=True)
+
+            # Hourly score chart for best day
+            if live_hourly_filtered is not None and not live_hourly_filtered.empty:
+                st.subheader("Hourly Score Breakdown")
+                best_day = live_daily_filtered.nlargest(1, "max_score").iloc[0]
+                best_date = best_day["date"]
+                hourly_best = live_hourly_filtered[live_hourly_filtered["date"] == best_date].copy()
+                if not hourly_best.empty:
+                    hourly_best["lake_name"] = hourly_best["lake_key"].map(
+                        lambda k: lake_label(k, ctx.lake_configs)
+                    )
+                    hourly_best["hour_label"] = hourly_best["hour"].apply(
+                        lambda h: f"{h % 12 or 12}{'AM' if h < 12 else 'PM'}"
+                    )
+                    fig_hourly = px.line(
+                        hourly_best,
+                        x="hour",
+                        y="trophy_score",
+                        color="lake_name",
+                        labels={"hour": "Hour of Day", "trophy_score": "Trophy Score", "lake_name": "Lake"},
+                        title=f"Hourly Scores - {pd.Timestamp(best_date).strftime('%A %b %d')} (Best Day)",
+                    )
+                    fig_hourly.update_xaxes(
+                        tickvals=list(range(0, 24, 2)),
+                        ticktext=[f"{h % 12 or 12}{'AM' if h < 12 else 'PM'}" for h in range(0, 24, 2)],
+                    )
+                    fig_hourly.add_vrect(x0=5, x1=9, fillcolor="rgba(199,144,61,0.1)", line_width=0,
+                                         annotation_text="Dawn", annotation_position="top left")
+                    fig_hourly.add_vrect(x0=17, x1=21, fillcolor="rgba(199,144,61,0.1)", line_width=0,
+                                         annotation_text="Dusk", annotation_position="top left")
+                    render_plotly(fig_hourly, height=400)
+
+    else:
+        st.error("Could not generate live forecast. Check your internet connection.")
 
 with tab_patterns:
     left, right = st.columns(2)
