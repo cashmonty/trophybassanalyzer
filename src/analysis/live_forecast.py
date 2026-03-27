@@ -425,23 +425,36 @@ def load_historical_profiles() -> dict:
         catches["date"] = pd.to_datetime(catches["date"])
         trophy_catches = catches[catches["weight_lbs"] >= 7.0]
 
-        # Per-lake trophy counts
-        lake_counts = trophy_catches.groupby("lake_key").size().to_dict()
+        # Load merged for full dataset stats and condition analysis
+        merged_cols = [
+            "lake_key", "date", "max_weight", "water_temp_estimated",
+            "moon_phase_name", "spawn_phase", "wind_class",
+            "pressure_trend_class",
+        ]
+        # Also grab catch_count/trophy_count if available
+        merged_all_cols = merged_cols + ["catch_count", "trophy_count"]
+        try:
+            merged = pd.read_parquet(merged_path, columns=merged_all_cols)
+        except Exception:
+            merged = pd.read_parquet(merged_path, columns=merged_cols)
+
+        # Per-lake trophy counts from merged (full tournament data)
+        if "trophy_count" in merged.columns:
+            lake_counts = merged.groupby("lake_key")["trophy_count"].sum().to_dict()
+            total_trophies = sum(lake_counts.values())
+        else:
+            lake_counts = trophy_catches.groupby("lake_key").size().to_dict()
+            total_trophies = sum(lake_counts.values())
         profiles["lake_trophy_counts"] = lake_counts
 
         # Trophy rate: trophies per year per lake
-        if len(catches) > 0:
-            years = (catches["date"].max() - catches["date"].min()).days / 365.25
+        merged["date"] = pd.to_datetime(merged["date"], errors="coerce")
+        date_range = merged["date"].dropna()
+        if len(date_range) > 0:
+            years = (date_range.max() - date_range.min()).days / 365.25
             years = max(years, 1)
             for lake_key, count in lake_counts.items():
                 profiles["lake_trophy_rates"][lake_key] = count / years
-
-        # Load merged for condition analysis
-        merged = pd.read_parquet(merged_path, columns=[
-            "lake_key", "max_weight", "water_temp_estimated",
-            "moon_phase_name", "spawn_phase", "wind_class",
-            "pressure_trend_class",
-        ])
         trophy_hours = merged[merged["max_weight"] >= 7.0]
 
         if len(trophy_hours) == 0:
@@ -473,7 +486,7 @@ def load_historical_profiles() -> dict:
             wind_counts = trophy_hours["wind_class"].value_counts()
             profiles["best_wind_classes"] = wind_counts.index.tolist()
 
-        logger.info(f"  Historical profiles loaded: {sum(lake_counts.values())} total trophies across {len(lake_counts)} lakes")
+        logger.info(f"  Historical profiles loaded: {total_trophies} total trophies across {len(lake_counts)} lakes")
         logger.info(f"  Optimal water temp: {profiles['optimal_water_temp_f'][0]:.0f}-{profiles['optimal_water_temp_f'][2]:.0f}F (peak {profiles['optimal_water_temp_f'][1]:.0f}F)")
 
     except Exception as e:

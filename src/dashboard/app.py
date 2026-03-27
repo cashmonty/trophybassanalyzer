@@ -147,6 +147,11 @@ trophy_catches = catches_df[catches_df["weight_lbs"] >= TROPHY_WEIGHT].copy()
 trophy_catches["month"] = trophy_catches["date"].dt.month
 trophy_daily = build_trophy_daily(merged_df)
 
+# Full dataset stats from merged (tournament-level aggregates)
+total_catches_all = int(merged_df["catch_count"].sum()) if "catch_count" in merged_df.columns else len(catches_df)
+total_trophies_all = int(merged_df["trophy_count"].sum()) if "trophy_count" in merged_df.columns else len(trophy_catches)
+trophy_rate_all = (total_trophies_all / max(total_catches_all, 1)) * 100
+
 selection_label = ", ".join(lake_label(key, ctx.lake_configs) for key in ctx.selected_lakes[:3])
 if len(ctx.selected_lakes) > 3:
     selection_label += f", +{len(ctx.selected_lakes) - 3} more"
@@ -182,10 +187,10 @@ if predictions_df is not None and not predictions_df.empty:
         next_window = future_predictions.nlargest(1, "max_probability").iloc[0]
 
 metric_cols = st.columns(6)
-metric_cols[0].metric("Recorded catches", f"{len(catches_df):,}")
-metric_cols[1].metric("Trophy fish", f"{len(trophy_catches):,}")
+metric_cols[0].metric("Recorded catches", f"{total_catches_all:,}")
+metric_cols[1].metric("Trophy fish", f"{total_trophies_all:,}")
 metric_cols[2].metric("Biggest verified", f"{biggest_fish:.2f} lbs" if biggest_fish else "N/A")
-metric_cols[3].metric("Trophy rate", f"{trophy_rate:.2f}%")
+metric_cols[3].metric("Trophy rate", f"{trophy_rate_all:.1f}%")
 metric_cols[4].metric("Best lake", lake_label(best_lake, ctx.lake_configs))
 metric_cols[5].metric("Peak month", best_month)
 
