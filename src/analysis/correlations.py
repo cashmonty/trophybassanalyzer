@@ -17,7 +17,7 @@ ANALYSIS_FEATURES = [
     "wind_speed_10m", "wind_gusts_10m", "relative_humidity_2m",
     "cloud_cover", "precipitation", "moon_illumination",
     "solunar_base_score", "temp_stability_3day",
-    "hour", "month", "day_of_year", "is_weekend",
+    "hour", "month", "day_of_year",
 ]
 
 
