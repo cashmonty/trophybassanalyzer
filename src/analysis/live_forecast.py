@@ -1,8 +1,12 @@
-"""Live 7-day trophy bass forecast using real weather forecast + solunar data.
+"""Live 7-day trophy bass forecast using ALL available data sources.
 
-Fetches actual forecast weather from Open-Meteo Forecast API (not archive),
-computes real astronomical/solunar data, derives all features from the real
-data, and scores each hour for trophy bass probability.
+Data sources:
+  - Open-Meteo Forecast API: real 7-day hourly weather
+  - USGS Water Services: live water temp + gage height
+  - ephem: real astronomical/solunar data
+  - Feature pipeline: pressure trends, front detection, spawn phase,
+    warming trends, water level trends, pre-frontal windows
+  - LightGBM model: trained on 15 years of historical data
 
 Usage:
     python -m src.analysis.live_forecast
@@ -10,6 +14,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 
@@ -31,6 +36,7 @@ from src.analysis.forecast import (
 logger = logging.getLogger(__name__)
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+USGS_IV_URL = "https://waterservices.usgs.gov/nwis/iv/"  # Instantaneous values (live)
 
 HOURLY_VARIABLES = [
     "temperature_2m",
@@ -51,6 +57,14 @@ HOURLY_VARIABLES = [
     "wind_gusts_10m",
 ]
 
+# USGS parameter codes
+PARAM_WATER_TEMP = "00010"
+PARAM_GAGE_HEIGHT = "00065"
+
+
+# ---------------------------------------------------------------------------
+# Data fetching
+# ---------------------------------------------------------------------------
 
 def fetch_7day_weather(lat: float, lon: float) -> pd.DataFrame:
     """Fetch 7-day hourly weather forecast from Open-Meteo."""
@@ -75,125 +89,81 @@ def fetch_7day_weather(lat: float, lon: float) -> pd.DataFrame:
     return df
 
 
-def compute_wind_class(wind_direction: pd.Series) -> pd.Series:
-    """Classify wind direction into fishing-relevant categories."""
-    wd = wind_direction
-    conditions = [
-        (wd >= 157.5) & (wd < 247.5),
-        (wd >= 247.5) & (wd < 337.5),
-        (wd >= 337.5) | (wd < 22.5),
-        (wd >= 22.5) & (wd < 67.5),
-        (wd >= 67.5) & (wd < 157.5),
-    ]
-    choices = ["south_warm", "northwest_cold", "north", "northeast", "east_poor"]
-    return pd.Series(
-        np.select(conditions, choices, default="variable"),
-        index=wind_direction.index,
-    )
+def fetch_live_usgs(station_id: str, lake_key: str) -> dict:
+    """Fetch recent USGS instantaneous values for water temp and gage height.
 
-
-def compute_pressure_trends(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute pressure trends from actual forecast pressure data."""
-    if "pressure_msl" not in df.columns:
-        return df
-    df = df.sort_values("datetime")
-    for hours in [3, 6]:
-        col = f"pressure_trend_{hours}h"
-        df[col] = df["pressure_msl"].diff(periods=hours)
-    return df
-
-
-def estimate_water_temp_from_forecast(df: pd.DataFrame) -> pd.DataFrame:
-    """Estimate water temp from air temp using exponential smoothing.
-
-    Uses a slower alpha since water lags air temp by 24-48h.
-    Initializes from recent historical water temp if available.
+    Returns dict with keys: water_temp_c, water_temp_f, gage_height_ft, gage_history.
+    gage_history is a list of (date, value) for the last 7 days for trend detection.
     """
-    if "temperature_2m" not in df.columns:
-        return df
+    result = {
+        "water_temp_c": None,
+        "water_temp_f": None,
+        "gage_height_ft": None,
+        "gage_history": [],
+    }
 
-    # Alpha = 0.04 — water responds to air temp but slowly (24-48h lag)
-    # Higher than historical (0.02) because we only have 7 days to show change
-    alpha = 0.04
-    air_temp = df["temperature_2m"].values
-    water_est = np.empty_like(air_temp, dtype=float)
+    try:
+        # Fetch last 7 days of instantaneous values for trend detection
+        params = {
+            "format": "json",
+            "sites": station_id,
+            "period": "P7D",
+            "parameterCd": f"{PARAM_WATER_TEMP},{PARAM_GAGE_HEIGHT}",
+            "siteStatus": "all",
+        }
+        resp = httpx.get(USGS_IV_URL, params=params, timeout=30.0)
+        resp.raise_for_status()
+        data = resp.json()
 
-    # Use first air temp as starting point, adjusted for season
-    start_temp = air_temp[0] if not np.isnan(air_temp[0]) else 10.0
-    month = df["datetime"].iloc[0].month
-    if month in (3, 4, 5):
-        start_temp = start_temp * 0.75  # water lags spring warming
-    elif month in (9, 10, 11):
-        start_temp = start_temp * 1.1  # water retains summer heat
+        time_series = data.get("value", {}).get("timeSeries", [])
+        for ts in time_series:
+            var_codes = ts.get("variable", {}).get("variableCode", [])
+            if not var_codes:
+                continue
+            param_code = var_codes[0].get("value", "")
 
-    water_est[0] = start_temp
-    for i in range(1, len(air_temp)):
-        if np.isnan(air_temp[i]):
-            water_est[i] = water_est[i - 1]
-        else:
-            water_est[i] = alpha * air_temp[i] + (1 - alpha) * water_est[i - 1]
+            values = []
+            for value_set in ts.get("values", []):
+                for entry in value_set.get("value", []):
+                    raw_val = entry.get("value")
+                    dt_str = entry.get("dateTime", "")
+                    try:
+                        val = float(raw_val)
+                        if val == -999999:
+                            continue
+                        values.append((dt_str, val))
+                    except (TypeError, ValueError):
+                        continue
 
-    df["water_temp_estimated"] = water_est
-    df["water_temp_f_est"] = water_est * 9 / 5 + 32
-    return df
+            if not values:
+                continue
 
+            # Most recent value
+            latest_dt, latest_val = values[-1]
 
-def _score_time_of_day(hour: int, sunrise_dt=None, sunset_dt=None) -> float:
-    """Score time of day for bass fishing (0-10 points).
+            if param_code == PARAM_WATER_TEMP:
+                result["water_temp_c"] = latest_val
+                result["water_temp_f"] = round(latest_val * 9 / 5 + 32, 1)
+                logger.info(f"  Live USGS water temp for {lake_key}: {latest_val:.1f}C / {result['water_temp_f']:.1f}F")
 
-    Dawn and dusk are prime. Midday is worst. Night is poor.
-    First/last light windows are the absolute best.
-    """
-    # Default sunrise/sunset for Indiana if not provided
-    if 5 <= hour <= 8:
-        return 10.0  # Dawn/early morning — prime
-    elif 17 <= hour <= 20:
-        return 9.0   # Dusk — prime
-    elif 9 <= hour <= 11:
-        return 6.0   # Late morning — decent
-    elif 15 <= hour <= 16:
-        return 6.0   # Afternoon — warming up
-    elif 12 <= hour <= 14:
-        return 4.0   # Midday — slowest
-    elif 21 <= hour <= 22:
-        return 3.0   # Early night — some activity
-    else:
-        return 1.0   # Middle of night — very low
+            elif param_code == PARAM_GAGE_HEIGHT:
+                result["gage_height_ft"] = latest_val
+                # Build daily history for trend detection
+                daily_vals = {}
+                for dt_str, val in values:
+                    d = dt_str[:10]
+                    daily_vals[d] = val  # last reading of each day
+                result["gage_history"] = sorted(daily_vals.items())
+                logger.info(f"  Live USGS gage height for {lake_key}: {latest_val:.2f} ft ({len(daily_vals)} days history)")
 
+    except Exception as e:
+        logger.warning(f"  Could not fetch live USGS for {lake_key}: {e}")
 
-def compute_trophy_score_live(row: pd.Series) -> float:
-    """Compute composite trophy bass score (0-100) for a single hourly record.
-
-    Scoring breakdown (max 100):
-        Water temp:    0-25 pts
-        Season:        0-20 pts
-        Solunar:       0-15 pts (reduced from 20 — moon matters but isn't everything)
-        Pressure:      0-10 pts (reduced — trends matter most)
-        Wind:          0-10 pts
-        Cloud cover:   0-10 pts
-        Time of day:   0-10 pts (NEW — dawn/dusk are prime, midnight is not)
-    """
-    temp_f = row.get("water_temp_f_est")
-    if pd.isna(temp_f) and "water_temp_estimated" in row.index:
-        temp_c = row.get("water_temp_estimated")
-        temp_f = temp_c * 9 / 5 + 32 if not pd.isna(temp_c) else None
-
-    score = 0.0
-    score += _score_water_temp(temp_f)                                          # 0-25
-    score += _score_season(row.get("month", 1), row.get("day_of_year", 1))     # 0-20
-    # Scale solunar down to 0-15 (from 0-20) — moon helps but isn't dominant
-    score += _score_solunar(row.get("solunar_base_score")) * 0.75              # 0-15
-    # Scale pressure to 0-10 (from 0-15)
-    score += _score_pressure(row.get("pressure_msl"), row.get("pressure_trend_3h")) * (10/15)  # 0-10
-    score += _score_wind(row.get("wind_speed_10m"), row.get("wind_class", "unknown"))  # 0-10
-    score += _score_cloud_cover(row.get("cloud_cover"))                        # 0-10
-    score += _score_time_of_day(int(row.get("hour", 12)))                      # 0-10
-
-    return min(score, 100.0)
+    return result
 
 
 def get_recent_water_temp(lake_key: str) -> float | None:
-    """Try to get recent actual water temp from USGS data for better initialization."""
+    """Fallback: get recent water temp from historical parquet data."""
     water_path = DATA_DIR / "raw" / "water" / f"{lake_key}.parquet"
     if not water_path.exists():
         return None
@@ -208,35 +178,399 @@ def get_recent_water_temp(lake_key: str) -> float | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Feature engineering (applied to forecast data)
+# ---------------------------------------------------------------------------
+
+def apply_full_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply the full feature engineering pipeline to forecast data.
+
+    Reuses the same logic from src.pipeline.features but adapted for
+    a single-lake 7-day forecast DataFrame.
+    """
+    df = df.sort_values("datetime").copy()
+
+    # Time features
+    dt = pd.to_datetime(df["datetime"])
+    df["hour"] = dt.dt.hour
+    df["month"] = dt.dt.month
+    df["day_of_year"] = dt.dt.dayofyear
+
+    # Pressure trends (3h and 6h)
+    if "pressure_msl" in df.columns:
+        for hours in [3, 6]:
+            df[f"pressure_trend_{hours}h"] = df["pressure_msl"].diff(periods=hours)
+
+        def classify_trend(val):
+            if pd.isna(val):
+                return "unknown"
+            if val > 1.5:
+                return "rising"
+            elif val < -1.5:
+                return "falling"
+            return "stable"
+
+        df["pressure_trend_class"] = df["pressure_trend_3h"].apply(classify_trend)
+
+    # Wind class
+    if "wind_direction_10m" in df.columns:
+        wd = df["wind_direction_10m"]
+        conditions = [
+            (wd >= 157.5) & (wd < 247.5),
+            (wd >= 247.5) & (wd < 337.5),
+            (wd >= 337.5) | (wd < 22.5),
+            (wd >= 22.5) & (wd < 67.5),
+            (wd >= 67.5) & (wd < 157.5),
+        ]
+        choices = ["south_warm", "northwest_cold", "north", "northeast", "east_poor"]
+        df["wind_class"] = np.select(conditions, choices, default="variable")
+
+    # Front detection
+    if {"pressure_msl", "wind_speed_10m", "wind_direction_10m"}.issubset(df.columns):
+        p_change = df["pressure_msl"].diff(6)
+        wd_change = df["wind_direction_10m"].diff(6).abs()
+        wd_change = wd_change.where(wd_change <= 180, 360 - wd_change)
+
+        front_conditions = [
+            (p_change < -3) & (wd_change > 30),
+            (p_change > 3) & (wd_change > 30),
+        ]
+        df["front_type"] = np.select(front_conditions, ["pre_frontal", "post_frontal"], default="stable")
+
+        # Days since last front
+        is_front = df["front_type"] != "stable"
+        cumsum = is_front.cumsum()
+        df["days_since_last_front"] = cumsum.groupby(cumsum).cumcount() / 24.0
+
+    # Temperature stability (3-day rolling std)
+    if "temperature_2m" in df.columns:
+        df["temp_stability_3day"] = df["temperature_2m"].rolling(72, min_periods=12).std()
+
+    # Warming trend
+    temp_col = "water_temp_estimated" if "water_temp_estimated" in df.columns else "temperature_2m"
+    if temp_col in df.columns:
+        daily_temp = df.groupby(pd.to_datetime(df["datetime"]).dt.date)[temp_col].transform("mean")
+        df["temp_change_3day"] = daily_temp.diff(periods=72)
+        df["is_warming_trend"] = (df["temp_change_3day"] > 0.5).astype(int)
+        df["warming_streak"] = df["is_warming_trend"].rolling(120, min_periods=24).sum()
+
+    # Water level trend
+    if "gage_height_ft" in df.columns and df["gage_height_ft"].notna().any():
+        df["water_level_change_1d"] = df["gage_height_ft"].diff(periods=24)
+
+        def classify_level(val):
+            if pd.isna(val):
+                return "unknown"
+            if val > 0.1:
+                return "rising"
+            elif val < -0.1:
+                return "falling"
+            return "stable"
+
+        df["water_level_trend"] = df["water_level_change_1d"].apply(classify_level)
+    else:
+        df["water_level_change_1d"] = np.nan
+        df["water_level_trend"] = "unknown"
+
+    # Spawn phase
+    if temp_col in df.columns:
+        temp_smooth = df[temp_col].rolling(7 * 24, min_periods=24).mean()
+        month = pd.to_datetime(df["datetime"]).dt.month
+
+        phase_conditions = [
+            temp_smooth < 7,
+            (temp_smooth >= 7) & (temp_smooth < 14) & (month <= 6),
+            (temp_smooth >= 14) & (temp_smooth < 20) & (month <= 6),
+            (temp_smooth >= 20) & (temp_smooth < 23) & (month <= 7),
+            (temp_smooth >= 23) | ((temp_smooth >= 20) & (month.between(7, 8))),
+            (temp_smooth >= 14) & (temp_smooth < 23) & (month >= 9),
+            (temp_smooth >= 7) & (temp_smooth < 14) & (month >= 9),
+        ]
+        phase_choices = ["WINTER", "PRE_SPAWN", "SPAWN", "POST_SPAWN", "SUMMER", "FALL", "TURNOVER"]
+        df["spawn_phase"] = np.select(phase_conditions, phase_choices, default="UNKNOWN")
+
+    # Pre-frontal feeding window
+    if "pressure_trend_3h" in df.columns and "front_type" in df.columns:
+        is_front = (df["front_type"] == "pre_frontal").astype(int)
+        df["hours_to_front"] = is_front.iloc[::-1].rolling(24, min_periods=1).max().iloc[::-1]
+
+        pressure_dropping = df["pressure_trend_3h"] < -0.3
+        has_wind = df.get("wind_class", pd.Series(dtype=str)).isin(["south_warm", "variable"])
+
+        df["prefrontal_feed_window"] = (
+            (df["hours_to_front"] > 0) &
+            pressure_dropping &
+            (has_wind if "wind_class" in df.columns else True)
+        ).astype(int)
+
+    return df
+
+
+def apply_water_temp_estimation(df: pd.DataFrame, live_water_temp_c: float | None,
+                                fallback_water_temp_c: float | None) -> pd.DataFrame:
+    """Estimate water temperature with best available starting point."""
+    if "temperature_2m" not in df.columns:
+        return df
+
+    # Determine starting water temp
+    start_temp = live_water_temp_c or fallback_water_temp_c
+    if start_temp is None:
+        # Estimate from air temp
+        start_temp = df["temperature_2m"].iloc[0]
+        if not np.isnan(start_temp):
+            month = df["datetime"].iloc[0].month
+            if month in (3, 4, 5):
+                start_temp *= 0.75
+            elif month in (9, 10, 11):
+                start_temp *= 1.1
+        else:
+            start_temp = 10.0
+
+    alpha = 0.04
+    air_temp = df["temperature_2m"].values
+    water_est = np.empty_like(air_temp, dtype=float)
+    water_est[0] = start_temp
+
+    for i in range(1, len(air_temp)):
+        if np.isnan(air_temp[i]):
+            water_est[i] = water_est[i - 1]
+        else:
+            water_est[i] = alpha * air_temp[i] + (1 - alpha) * water_est[i - 1]
+
+    df["water_temp_estimated"] = water_est
+    df["water_temp_f_est"] = water_est * 9 / 5 + 32
+    return df
+
+
+def apply_gage_height(df: pd.DataFrame, current_gage: float | None,
+                      gage_history: list[tuple[str, float]]) -> pd.DataFrame:
+    """Apply gage height data — use live value and project forward."""
+    if current_gage is None:
+        return df
+
+    # Set current gage height for all forecast rows
+    # If we have history, compute a daily trend and project
+    if gage_history and len(gage_history) >= 2:
+        vals = [v for _, v in gage_history]
+        daily_change = (vals[-1] - vals[0]) / max(len(vals) - 1, 1)
+
+        # Project gage height forward from current
+        hours = np.arange(len(df))
+        df["gage_height_ft"] = current_gage + (hours / 24.0) * daily_change
+    else:
+        df["gage_height_ft"] = current_gage
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+# ML model integration
+# ---------------------------------------------------------------------------
+
+def get_ml_predictions(df: pd.DataFrame) -> pd.Series | None:
+    """Run the trained LightGBM model on forecast data, if available."""
+    try:
+        from src.analysis.model import load_model, load_feature_cols, prepare_features, align_features
+
+        model = load_model()
+        training_cols = load_feature_cols()
+
+        X, _ = prepare_features(df)
+        X = align_features(X, training_cols)
+
+        predictions = model.predict(X)
+        logger.info(f"  ML model predictions: min={predictions.min():.4f}, max={predictions.max():.4f}, mean={predictions.mean():.4f}")
+        return pd.Series(predictions, index=df.index)
+
+    except FileNotFoundError:
+        logger.warning("  No trained model found — skipping ML predictions")
+        return None
+    except Exception as e:
+        logger.warning(f"  ML prediction failed: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Scoring
+# ---------------------------------------------------------------------------
+
+def _score_time_of_day(hour: int) -> float:
+    """Score time of day for bass fishing (0-10 points)."""
+    if 5 <= hour <= 8:
+        return 10.0
+    elif 17 <= hour <= 20:
+        return 9.0
+    elif 9 <= hour <= 11:
+        return 6.0
+    elif 15 <= hour <= 16:
+        return 6.0
+    elif 12 <= hour <= 14:
+        return 4.0
+    elif 21 <= hour <= 22:
+        return 3.0
+    else:
+        return 1.0
+
+
+def _score_spawn_phase(phase: str) -> float:
+    """Score based on bass seasonal phase (0-8 points)."""
+    scores = {
+        "PRE_SPAWN": 8.0,   # Prime trophy window
+        "SPAWN": 6.0,       # Big fish on beds
+        "FALL": 5.0,        # Fall feed-up
+        "POST_SPAWN": 4.0,  # Transitioning
+        "SUMMER": 3.0,      # Tough but doable
+        "TURNOVER": 2.0,    # Difficult
+        "WINTER": 1.0,      # Very tough
+    }
+    return scores.get(str(phase), 3.0)
+
+
+def _score_warming_trend(is_warming: float, warming_streak: float) -> float:
+    """Score warming trend (0-5 points). 3+ warm days = trophy trigger."""
+    score = 0.0
+    if not pd.isna(is_warming) and is_warming > 0:
+        score += 2.0
+    if not pd.isna(warming_streak):
+        if warming_streak >= 72:  # 3+ days
+            score += 3.0
+        elif warming_streak >= 48:
+            score += 2.0
+        elif warming_streak >= 24:
+            score += 1.0
+    return score
+
+
+def _score_frontal_activity(front_type: str, prefrontal: float, hours_to_front: float) -> float:
+    """Score frontal activity (0-7 points). Pre-frontal = money window."""
+    if not pd.isna(prefrontal) and prefrontal > 0:
+        return 7.0  # Pre-frontal feeding window — best
+    if str(front_type) == "pre_frontal":
+        return 5.0
+    if not pd.isna(hours_to_front) and hours_to_front > 0:
+        return 4.0  # Front approaching
+    if str(front_type) == "post_frontal":
+        return 1.0  # Post-frontal lockjaw
+    return 3.0  # Stable — neutral
+
+
+def _score_water_level(trend: str, change: float) -> float:
+    """Score water level trend (0-5 points). Rising = feeding trigger."""
+    if str(trend) == "rising":
+        return 5.0
+    elif str(trend) == "stable":
+        return 3.0
+    elif str(trend) == "falling":
+        return 2.0
+    return 3.0  # unknown
+
+
+def compute_trophy_score_full(row: pd.Series, ml_pred: float | None = None) -> float:
+    """Compute composite trophy bass score (0-100) using ALL available data.
+
+    Scoring breakdown (max 100):
+        Water temp:      0-20 pts  (pre-spawn sweet spot)
+        Season:          0-12 pts  (timing)
+        Spawn phase:     0-8 pts   (biological state)
+        Solunar:         0-10 pts  (moon/tidal)
+        Pressure trend:  0-8 pts   (frontal systems)
+        Frontal activity:0-7 pts   (pre-frontal = money)
+        Wind:            0-8 pts   (direction + speed)
+        Cloud cover:     0-5 pts   (overcast better)
+        Time of day:     0-8 pts   (dawn/dusk prime)
+        Warming trend:   0-5 pts   (consecutive warm days)
+        Water level:     0-4 pts   (rising = feeding trigger)
+        ML model boost:  0-5 pts   (historical pattern match)
+    """
+    temp_f = row.get("water_temp_f_est")
+    if pd.isna(temp_f) and "water_temp_estimated" in row.index:
+        temp_c = row.get("water_temp_estimated")
+        temp_f = temp_c * 9 / 5 + 32 if not pd.isna(temp_c) else None
+
+    score = 0.0
+    score += _score_water_temp(temp_f) * (20 / 25)                               # 0-20
+    score += _score_season(row.get("month", 1), row.get("day_of_year", 1)) * 0.6  # 0-12
+    score += _score_spawn_phase(row.get("spawn_phase", "UNKNOWN"))                 # 0-8
+    score += _score_solunar(row.get("solunar_base_score")) * 0.5                   # 0-10
+    score += _score_pressure(
+        row.get("pressure_msl"), row.get("pressure_trend_3h")) * (8 / 15)         # 0-8
+    score += _score_frontal_activity(
+        row.get("front_type", "stable"),
+        row.get("prefrontal_feed_window", 0),
+        row.get("hours_to_front", 0))                                               # 0-7
+    score += _score_wind(
+        row.get("wind_speed_10m"), row.get("wind_class", "unknown")) * 0.8         # 0-8
+    score += _score_cloud_cover(row.get("cloud_cover")) * 0.5                      # 0-5
+    score += _score_time_of_day(int(row.get("hour", 12))) * 0.8                   # 0-8
+    score += _score_warming_trend(
+        row.get("is_warming_trend", 0), row.get("warming_streak", 0))             # 0-5
+    score += _score_water_level(
+        row.get("water_level_trend", "unknown"),
+        row.get("water_level_change_1d", 0))                                       # 0-4 (capped)
+    score = min(score, 95.0)  # Cap heuristic at 95
+
+    # ML model boost (up to 5 additional points)
+    if ml_pred is not None and not np.isnan(ml_pred):
+        # ML pred is 0-1 probability; scale to 0-5 bonus
+        score += min(ml_pred * 50, 5.0)
+
+    return min(score, 100.0)
+
+
+# ---------------------------------------------------------------------------
+# Main forecast generator
+# ---------------------------------------------------------------------------
+
 def generate_live_forecast() -> pd.DataFrame:
-    """Generate a 7-day live trophy bass forecast for all lakes."""
+    """Generate a 7-day live trophy bass forecast using all available data."""
     lakes = load_lakes()
     today = date.today()
     end_date = today + timedelta(days=6)
 
     logger.info(f"Generating live 7-day forecast: {today} to {end_date}")
+    logger.info("Data sources: Open-Meteo forecast, USGS live water, ephem solunar, feature pipeline, LightGBM model")
 
     all_lake_forecasts = []
 
     for lake in lakes:
-        logger.info(f"Fetching weather forecast for {lake.key} ({lake.name})...")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Processing {lake.key} ({lake.name})...")
 
         # 1. Fetch real weather forecast
+        logger.info(f"  Fetching 7-day weather forecast...")
         weather_df = fetch_7day_weather(lake.lat, lake.lon)
         if weather_df.empty:
-            logger.warning(f"No weather forecast for {lake.key}, skipping")
+            logger.warning(f"  No weather forecast for {lake.key}, skipping")
             continue
-
         weather_df["lake_key"] = lake.key
 
-        # 2. Compute real astro/solunar data
-        logger.info(f"Computing solunar data for {lake.key}...")
-        astro_df = compute_astro_for_lake(
-            lake.key, lake.lat, lake.lon, today, end_date
-        )
+        # 2. Fetch live USGS water data
+        live_water_temp_c = None
+        current_gage = None
+        gage_history = []
+
+        if lake.usgs_station:
+            logger.info(f"  Fetching live USGS data (station {lake.usgs_station})...")
+            usgs_data = fetch_live_usgs(lake.usgs_station, lake.key)
+            live_water_temp_c = usgs_data["water_temp_c"]
+            current_gage = usgs_data["gage_height_ft"]
+            gage_history = usgs_data["gage_history"]
+        else:
+            logger.info(f"  No USGS station for {lake.key}, using fallback water temp")
+
+        # Fallback to historical parquet if no live data
+        fallback_water_temp = None
+        if live_water_temp_c is None:
+            fallback_water_temp = get_recent_water_temp(lake.key)
+            if fallback_water_temp:
+                logger.info(f"  Using historical water temp: {fallback_water_temp:.1f}C")
+
+        # 3. Compute real astro/solunar data
+        logger.info(f"  Computing solunar data...")
+        astro_df = compute_astro_for_lake(lake.key, lake.lat, lake.lon, today, end_date)
         astro_df["date"] = pd.to_datetime(astro_df["date"]).dt.date
 
-        # 3. Merge astro onto weather
+        # 4. Merge astro onto weather
         weather_df["date"] = weather_df["datetime"].dt.date
         astro_cols = ["date", "lake_key", "moon_illumination", "moon_phase_name",
                       "solunar_base_score", "sunrise", "sunset",
@@ -248,43 +582,34 @@ def generate_live_forecast() -> pd.DataFrame:
             astro_df[astro_cols], on=["date", "lake_key"], how="left"
         )
 
-        # 4. Derive features from REAL data
-        weather_df = compute_pressure_trends(weather_df)
+        # 5. Apply water temp estimation with best available data
+        weather_df = apply_water_temp_estimation(weather_df, live_water_temp_c, fallback_water_temp)
 
-        # Wind class from real wind direction
-        if "wind_direction_10m" in weather_df.columns:
-            weather_df["wind_class"] = compute_wind_class(weather_df["wind_direction_10m"])
+        # 6. Apply gage height data
+        weather_df = apply_gage_height(weather_df, current_gage, gage_history)
 
-        # Water temp estimation
-        recent_water = get_recent_water_temp(lake.key)
-        if recent_water is not None:
-            logger.info(f"  Using recent water temp {recent_water:.1f}°C for {lake.key}")
-            # Override the starting temp with real data
-            weather_df = estimate_water_temp_from_forecast(weather_df)
-            # Re-initialize with actual water temp
-            alpha = 0.04
-            air_temp = weather_df["temperature_2m"].values
-            water_est = np.empty_like(air_temp, dtype=float)
-            water_est[0] = recent_water
-            for i in range(1, len(air_temp)):
-                if np.isnan(air_temp[i]):
-                    water_est[i] = water_est[i - 1]
-                else:
-                    water_est[i] = alpha * air_temp[i] + (1 - alpha) * water_est[i - 1]
-            weather_df["water_temp_estimated"] = water_est
-            weather_df["water_temp_f_est"] = water_est * 9 / 5 + 32
+        # 7. Run FULL feature engineering pipeline
+        logger.info(f"  Running full feature pipeline...")
+        weather_df = apply_full_features(weather_df)
+
+        # 8. Get ML model predictions
+        logger.info(f"  Running ML model...")
+        ml_preds = get_ml_predictions(weather_df)
+
+        # 9. Score every hour with all data
+        logger.info(f"  Computing trophy scores...")
+        if ml_preds is not None:
+            weather_df["ml_prediction"] = ml_preds.values
+            weather_df["trophy_score"] = weather_df.apply(
+                lambda row: compute_trophy_score_full(row, row.get("ml_prediction")), axis=1
+            )
         else:
-            weather_df = estimate_water_temp_from_forecast(weather_df)
-
-        # Time features
-        weather_df["hour"] = weather_df["datetime"].dt.hour
-        weather_df["month"] = weather_df["datetime"].dt.month
-        weather_df["day_of_year"] = weather_df["datetime"].dt.dayofyear
-
-        # 5. Score every hour
-        weather_df["trophy_score"] = weather_df.apply(compute_trophy_score_live, axis=1)
+            weather_df["trophy_score"] = weather_df.apply(
+                lambda row: compute_trophy_score_full(row), axis=1
+            )
 
         all_lake_forecasts.append(weather_df)
+        logger.info(f"  Done. Score range: {weather_df['trophy_score'].min():.0f}-{weather_df['trophy_score'].max():.0f}")
 
     if not all_lake_forecasts:
         logger.error("No forecasts generated for any lake")
@@ -316,17 +641,19 @@ def generate_live_forecast() -> pd.DataFrame:
     daily["best_hour"] = hourly.loc[daily["best_hour_idx"].values, "hour"].values
     daily.drop(columns=["best_hour_idx"], inplace=True)
 
-    # Get wind class for best hours
-    best_wind = []
-    for _, row in daily.iterrows():
-        lake_hours = hourly[
-            (hourly["date"] == row["date"]) & (hourly["lake_key"] == row["lake_key"])
-        ]
-        if len(lake_hours) > 0 and "wind_class" in lake_hours.columns:
-            best_wind.append(lake_hours["wind_class"].mode().iloc[0] if len(lake_hours) > 0 else "unknown")
-        else:
-            best_wind.append("unknown")
-    daily["dominant_wind"] = best_wind
+    # Get dominant wind, spawn phase for each day
+    for col_name, src_col in [("dominant_wind", "wind_class"), ("spawn_phase", "spawn_phase")]:
+        if src_col in hourly.columns:
+            day_vals = []
+            for _, row in daily.iterrows():
+                mask = (hourly["date"] == row["date"]) & (hourly["lake_key"] == row["lake_key"])
+                lake_hrs = hourly.loc[mask, src_col]
+                if len(lake_hrs) > 0:
+                    mode = lake_hrs.mode()
+                    day_vals.append(mode.iloc[0] if len(mode) > 0 else "unknown")
+                else:
+                    day_vals.append("unknown")
+            daily[col_name] = day_vals
 
     # Moon phase
     if "moon_phase_name" in hourly.columns:
@@ -347,9 +674,13 @@ def generate_live_forecast() -> pd.DataFrame:
     daily_path = DATA_DIR / "processed" / "live_forecast_daily.parquet"
     daily.to_parquet(daily_path, index=False)
 
-    logger.info(f"Saved live forecast: {len(daily)} daily records, {len(hourly)} hourly records")
+    logger.info(f"\nSaved live forecast: {len(daily)} daily records, {len(hourly)} hourly records")
     return daily
 
+
+# ---------------------------------------------------------------------------
+# CLI display
+# ---------------------------------------------------------------------------
 
 def _fmt_hour(h):
     """Format hour as 12h AM/PM string."""
@@ -373,7 +704,6 @@ def _fmt_time(dt_val):
     try:
         return dt_val.strftime("%-I:%M%p").lower()
     except ValueError:
-        # Windows strftime doesn't support %-I
         return dt_val.strftime("%I:%M%p").lower().lstrip("0")
 
 
@@ -382,18 +712,21 @@ def print_forecast(daily: pd.DataFrame, hourly: pd.DataFrame | None = None) -> N
     lakes = load_lakes()
     lake_names = {l.key: l.name for l in lakes}
 
-    print("\n" + "=" * 90)
+    print("\n" + "=" * 95)
     print("  7-DAY TROPHY BASS FORECAST - INDIANA")
     print(f"  Generated: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}")
-    print("=" * 90)
+    print(f"  Data: Open-Meteo forecast + USGS live water + solunar + feature pipeline + LightGBM model")
+    print("=" * 95)
 
     for d in sorted(daily["date"].unique()):
         day_data = daily[daily["date"] == d].sort_values("max_score", ascending=False)
         day_name = pd.Timestamp(d).strftime("%A %b %d")
         moon = day_data.iloc[0].get("moon_phase_name", "")
         moon_illum = day_data.iloc[0].get("moon_illumination", 0)
+        if pd.isna(moon_illum):
+            moon_illum = 0
+        phase = day_data.iloc[0].get("spawn_phase", "")
 
-        # Get solunar periods from hourly data (same for all lakes on a given day, roughly)
         solunar_str = ""
         if hourly is not None:
             day_hours = hourly[hourly["date"] == d]
@@ -416,11 +749,11 @@ def print_forecast(daily: pd.DataFrame, hourly: pd.DataFrame | None = None) -> N
                 if minors:
                     solunar_str += f"  Minor: {', '.join(minors)}"
 
-        print(f"\n{'-' * 90}")
-        print(f"  {day_name}  |  Moon: {moon} ({moon_illum*100:.0f}%)")
+        print(f"\n{'-' * 95}")
+        print(f"  {day_name}  |  Moon: {moon} ({moon_illum*100:.0f}%)  |  Phase: {phase}")
         if solunar_str:
             print(f"  Solunar:{solunar_str}")
-        print(f"{'-' * 90}")
+        print(f"{'-' * 95}")
         print(f"  {'Lake':<18} {'Score':>5} {'Rating':<9} {'Best Hr':>7} "
               f"{'WaterF':>6} {'Hi/Lo':>9} {'Wind':>5} {'Gust':>5} {'Cloud':>5} {'Rain':>6} {'Wind Dir':<12}")
 
@@ -438,16 +771,16 @@ def print_forecast(daily: pd.DataFrame, hourly: pd.DataFrame | None = None) -> N
                   f"{wind_mph:>4.0f}  {gust_mph:>4.0f}  {row['cloud_avg']:>4.0f}% "
                   f"{precip_in:>5.2f}\" {row['dominant_wind']:<12}")
 
-    # Top 3 overall picks
     top3 = daily.nlargest(3, "max_score")
-    print(f"\n{'=' * 90}")
+    print(f"\n{'=' * 95}")
     print("  TOP 3 FISHING WINDOWS THIS WEEK:")
-    print(f"{'=' * 90}")
+    print(f"{'=' * 95}")
     for i, (_, row) in enumerate(top3.iterrows(), 1):
         lake_name = lake_names.get(row["lake_key"], row["lake_key"])
         day_name = pd.Timestamp(row["date"]).strftime("%A %b %d")
+        phase = row.get("spawn_phase", "")
         print(f"  #{i}: {lake_name} on {day_name} - Score {row['max_score']:.0f} "
-              f"({row['rating']}) - Best at {_fmt_hour(row['best_hour'])}")
+              f"({row['rating']}) - Best at {_fmt_hour(row['best_hour'])} [{phase}]")
 
     print()
 
@@ -459,7 +792,6 @@ if __name__ == "__main__":
     )
     daily = generate_live_forecast()
     if len(daily) > 0:
-        # Load hourly for solunar period display
         hourly_path = DATA_DIR / "processed" / "live_forecast_hourly.parquet"
         hourly = pd.read_parquet(hourly_path) if hourly_path.exists() else None
         print_forecast(daily, hourly)
