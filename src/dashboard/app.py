@@ -90,13 +90,25 @@ def build_trophy_daily(merged_df: pd.DataFrame) -> pd.DataFrame:
         "solunar_score": ("solunar_base_score", "mean"),
         "spawn_phase": ("spawn_phase", "first"),
     }
-    if "water_temp_estimated" in trophy_hours.columns:
+    if "water_temp_f" in trophy_hours.columns:
+        agg["water_temp_f"] = ("water_temp_f", "mean")
+    elif "water_temp_estimated" in trophy_hours.columns:
         agg["water_temp_f"] = ("water_temp_estimated", lambda x: x.mean() * 9 / 5 + 32)
     if "wind_class" in trophy_hours.columns:
         agg["wind_class"] = (
             "wind_class",
             lambda x: x.mode().iloc[0] if not x.mode().empty else "unknown",
         )
+    if "gage_height_ft" in trophy_hours.columns:
+        agg["gage_height_ft"] = ("gage_height_ft", "mean")
+    if "front_type" in trophy_hours.columns:
+        agg["front_type"] = ("front_type", "first")
+    if "is_warming_trend" in trophy_hours.columns:
+        agg["is_warming_trend"] = ("is_warming_trend", "first")
+    if "pressure_trend_class" in trophy_hours.columns:
+        agg["pressure_trend_class"] = ("pressure_trend_class", "first")
+    if "water_level_trend" in trophy_hours.columns:
+        agg["water_level_trend"] = ("water_level_trend", "first")
 
     trophy_daily = trophy_hours.groupby(["date", "lake_key"], observed=True).agg(**agg).reset_index()
     trophy_daily["date"] = pd.to_datetime(trophy_daily["date"])
@@ -553,9 +565,11 @@ with tab_patterns:
 with tab_conditions:
     left, right = st.columns(2)
     all_with_catch = merged_df[merged_df["catch_count"] > 0].copy()
-    if "water_temp_estimated" in all_with_catch.columns:
+    if "water_temp_f" not in all_with_catch.columns and "water_temp_estimated" in all_with_catch.columns:
         all_with_catch["water_temp_f"] = all_with_catch["water_temp_estimated"] * 9 / 5 + 32
     all_with_catch["pressure_inhg"] = all_with_catch["pressure_msl"] * 0.02953
+    if "temperature_2m" in all_with_catch.columns:
+        all_with_catch["air_temp_f"] = all_with_catch["temperature_2m"] * 9 / 5 + 32
 
     with left:
         st.subheader("Water temperature bands")
@@ -625,6 +639,50 @@ with tab_conditions:
         )
         render_plotly(fig_pressure, height=380)
 
+    mid_left, mid_right = st.columns(2)
+    with mid_left:
+        st.subheader("Gage height at trophy catch")
+        if not trophy_daily.empty and "gage_height_ft" in merged_df.columns:
+            trophy_gage = merged_df[
+                (merged_df["max_weight"] >= TROPHY_WEIGHT) & merged_df["gage_height_ft"].notna()
+            ].copy()
+            if not trophy_gage.empty:
+                trophy_gage_daily = trophy_gage.groupby(["date", "lake_key"], observed=True).agg(
+                    gage=("gage_height_ft", "mean"), weight=("max_weight", "max")
+                ).reset_index()
+                trophy_gage_daily["lake_name"] = trophy_gage_daily["lake_key"].map(
+                    lambda k: lake_label(k, ctx.lake_configs)
+                )
+                fig_gage = px.scatter(
+                    trophy_gage_daily, x="gage", y="weight", color="lake_name",
+                    labels={"gage": "Gage Height (ft)", "weight": "Best Fish (lbs)", "lake_name": "Lake"},
+                )
+                render_plotly(fig_gage, height=360)
+            else:
+                st.info("No gage height data for trophy catches.")
+        else:
+            st.info("No gage height data available.")
+
+    with mid_right:
+        st.subheader("Water level trend at trophy catch")
+        if not trophy_daily.empty and "water_level_trend" in merged_df.columns:
+            trophy_wl = merged_df[merged_df["max_weight"] >= TROPHY_WEIGHT].copy()
+            if not trophy_wl.empty and "water_level_trend" in trophy_wl.columns:
+                wl_counts = trophy_wl.groupby(["date", "lake_key"], observed=True)["water_level_trend"].first().value_counts()
+                wl_labels = {"rising": "Rising", "stable": "Stable", "falling": "Falling"}
+                fig_wl = go.Figure(go.Bar(
+                    x=[wl_labels.get(k, k) for k in wl_counts.index],
+                    y=wl_counts.values,
+                    marker_color=ctx.colors["bass_green"],
+                    text=wl_counts.values, textposition="outside",
+                ))
+                fig_wl.update_layout(yaxis_title="Trophy days")
+                render_plotly(fig_wl, height=360)
+            else:
+                st.info("No water level trend data for trophy catches.")
+        else:
+            st.info("No water level trend data available.")
+
     lower_left, lower_right = st.columns(2)
     with lower_left:
         st.subheader("Wind direction pattern")
@@ -682,6 +740,87 @@ with tab_conditions:
                 render_plotly(fig_scatter, height=360)
         else:
             st.info("No trophy-day condition sample is available for this view.")
+
+    extra_left, extra_right = st.columns(2)
+    with extra_left:
+        st.subheader("Frontal activity at trophy catch")
+        if not trophy_daily.empty and "front_type" in merged_df.columns:
+            trophy_front = merged_df[merged_df["max_weight"] >= TROPHY_WEIGHT].copy()
+            if "front_type" in trophy_front.columns:
+                front_daily = trophy_front.groupby(["date", "lake_key"], observed=True)["front_type"].first().value_counts()
+                front_labels = {"stable": "Stable", "pre_frontal": "Pre-Frontal", "post_frontal": "Post-Frontal"}
+                fig_front = go.Figure(go.Bar(
+                    x=[front_labels.get(k, k) for k in front_daily.index],
+                    y=front_daily.values,
+                    marker_color=[
+                        ctx.colors["bass_green"] if k == "pre_frontal" else ctx.colors["water_blue"]
+                        for k in front_daily.index
+                    ],
+                    text=front_daily.values, textposition="outside",
+                ))
+                fig_front.update_layout(yaxis_title="Trophy days")
+                render_plotly(fig_front, height=360)
+        else:
+            st.info("No frontal data available.")
+
+    with extra_right:
+        st.subheader("Warming trend at trophy catch")
+        if not trophy_daily.empty and "is_warming_trend" in merged_df.columns:
+            trophy_warming = merged_df[merged_df["max_weight"] >= TROPHY_WEIGHT].copy()
+            if "is_warming_trend" in trophy_warming.columns:
+                warm_daily = trophy_warming.groupby(["date", "lake_key"], observed=True)["is_warming_trend"].first()
+                warm_counts = warm_daily.map({True: "Warming", False: "Cooling/Stable", 1: "Warming", 0: "Cooling/Stable"}).value_counts()
+                fig_warm = go.Figure(go.Bar(
+                    x=warm_counts.index.tolist(),
+                    y=warm_counts.values,
+                    marker_color=[ctx.colors["trophy_gold"], ctx.colors["fog"]],
+                    text=warm_counts.values, textposition="outside",
+                ))
+                fig_warm.update_layout(yaxis_title="Trophy days")
+                render_plotly(fig_warm, height=360)
+        else:
+            st.info("No warming trend data available.")
+
+    # Pressure trend class distribution
+    press_left, press_right = st.columns(2)
+    with press_left:
+        st.subheader("Pressure trend at trophy catch")
+        if "pressure_trend_class" in merged_df.columns:
+            trophy_press = merged_df[merged_df["max_weight"] >= TROPHY_WEIGHT].copy()
+            if "pressure_trend_class" in trophy_press.columns:
+                press_daily = trophy_press.groupby(["date", "lake_key"], observed=True)["pressure_trend_class"].first().value_counts()
+                press_labels = {"falling": "Falling", "stable": "Stable", "rising": "Rising"}
+                fig_press = go.Figure(go.Bar(
+                    x=[press_labels.get(k, k) for k in press_daily.index],
+                    y=press_daily.values,
+                    marker_color=ctx.colors["clay"],
+                    text=press_daily.values, textposition="outside",
+                ))
+                fig_press.update_layout(yaxis_title="Trophy days")
+                render_plotly(fig_press, height=360)
+        else:
+            st.info("No pressure trend data available.")
+
+    with press_right:
+        st.subheader("Spawn phase at trophy catch")
+        if "spawn_phase" in merged_df.columns:
+            trophy_spawn = merged_df[merged_df["max_weight"] >= TROPHY_WEIGHT].copy()
+            if "spawn_phase" in trophy_spawn.columns:
+                spawn_daily = trophy_spawn.groupby(["date", "lake_key"], observed=True)["spawn_phase"].first().value_counts()
+                phase_labels = {
+                    "PRE_SPAWN": "Pre-spawn", "SPAWN": "Spawn", "POST_SPAWN": "Post-spawn",
+                    "SUMMER": "Summer", "FALL": "Fall", "TURNOVER": "Turnover", "WINTER": "Winter",
+                }
+                fig_spawn = go.Figure(go.Bar(
+                    x=[phase_labels.get(k, k) for k in spawn_daily.index],
+                    y=spawn_daily.values,
+                    marker_color=ctx.colors["trophy_gold"],
+                    text=spawn_daily.values, textposition="outside",
+                ))
+                fig_spawn.update_layout(yaxis_title="Trophy days")
+                render_plotly(fig_spawn, height=360)
+        else:
+            st.info("No spawn phase data available.")
 
 with tab_predictions:
     st.subheader("Upcoming windows that merit a trip")

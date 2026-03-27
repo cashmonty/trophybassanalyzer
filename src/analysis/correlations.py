@@ -12,11 +12,14 @@ logger = logging.getLogger(__name__)
 
 # Features to analyze against catch outcomes
 ANALYSIS_FEATURES = [
-    "temperature_2m", "water_temp_estimated", "pressure_msl",
+    "temperature_2m", "water_temp_estimated", "water_temp_f", "pressure_msl",
     "pressure_trend_3h", "pressure_trend_6h",
     "wind_speed_10m", "wind_gusts_10m", "relative_humidity_2m",
     "cloud_cover", "precipitation", "moon_illumination",
     "solunar_base_score", "temp_stability_3day",
+    "temp_change_3day", "warming_streak", "gage_height_ft",
+    "water_level_change_1d", "days_since_last_front",
+    "prefrontal_feed_window", "hours_to_front",
     "hour", "month", "day_of_year",
 ]
 

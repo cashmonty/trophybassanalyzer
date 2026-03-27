@@ -14,7 +14,7 @@ for candidate in Path(__file__).resolve().parents:
             sys.path.insert(0, candidate_str)
         break
 
-from src.dashboard.ui import bootstrap_dashboard, render_page_header, render_plotly
+from src.dashboard.ui import MONTH_NAMES, bootstrap_dashboard, render_page_header, render_plotly
 
 ctx = bootstrap_dashboard("Overview")
 COLORS = ctx.colors
@@ -131,9 +131,7 @@ with col_right:
             .agg(total_catches=("catch_count", "sum"), total_trophies=("trophy_count", "sum"))
             .reset_index()
         )
-        month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
-                       7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
-        monthly["month_name"] = monthly["month"].map(month_names)
+        monthly["month_name"] = monthly["month"].map(MONTH_NAMES)
 
         fig_m = go.Figure()
         fig_m.add_trace(go.Bar(
@@ -155,6 +153,54 @@ with col_right:
         st.info("No monthly data available.")
 
 # ---------------------------------------------------------------------------
+# Spawn phase and water temp breakdown
+# ---------------------------------------------------------------------------
+col_sp, col_wt = st.columns(2)
+
+with col_sp:
+    st.subheader("Trophy Catches by Spawn Phase")
+    if {"spawn_phase", "trophy_count"}.issubset(df.columns):
+        phase_data = df.groupby("spawn_phase", observed=True)["trophy_count"].sum().reset_index()
+        phase_data = phase_data[phase_data["trophy_count"] > 0].sort_values("trophy_count", ascending=True)
+        phase_labels = {
+            "PRE_SPAWN": "Pre-spawn", "SPAWN": "Spawn", "POST_SPAWN": "Post-spawn",
+            "SUMMER": "Summer", "FALL": "Fall", "TURNOVER": "Turnover", "WINTER": "Winter",
+        }
+        phase_data["label"] = phase_data["spawn_phase"].map(phase_labels).fillna(phase_data["spawn_phase"])
+        fig_sp = px.bar(phase_data, y="label", x="trophy_count", orientation="h",
+                        color_discrete_sequence=[COLORS["trophy_gold"]],
+                        labels={"trophy_count": "Trophies", "label": ""})
+        render_plotly(fig_sp, height=350)
+    else:
+        st.info("Spawn phase data not available.")
+
+with col_wt:
+    st.subheader("Water Temp at Trophy Catch")
+    if {"water_temp_f", "trophy_caught"}.issubset(df.columns):
+        trophy_wt = df[df["trophy_caught"] == 1]["water_temp_f"].dropna()
+        if not trophy_wt.empty:
+            fig_wt = go.Figure(go.Histogram(
+                x=trophy_wt, nbinsx=20,
+                marker_color=COLORS["water_blue"],
+            ))
+            fig_wt.add_vline(x=trophy_wt.median(), line_dash="dash", line_color=COLORS["trophy_gold"],
+                             annotation_text=f"Median: {trophy_wt.median():.0f}F")
+            fig_wt.update_layout(xaxis_title="Water Temp (F)", yaxis_title="Trophy Hours")
+            render_plotly(fig_wt, height=350)
+        else:
+            st.info("No water temp data for trophy catches.")
+    elif {"water_temp_estimated", "trophy_caught"}.issubset(df.columns):
+        trophy_wt = df[df["trophy_caught"] == 1]["water_temp_estimated"].dropna() * 9 / 5 + 32
+        if not trophy_wt.empty:
+            fig_wt = go.Figure(go.Histogram(x=trophy_wt, nbinsx=20, marker_color=COLORS["water_blue"]))
+            fig_wt.update_layout(xaxis_title="Water Temp (F)", yaxis_title="Trophy Hours")
+            render_plotly(fig_wt, height=350)
+    else:
+        st.info("Water temp data not available.")
+
+st.markdown("---")
+
+# ---------------------------------------------------------------------------
 # Seasonal heatmap (month x hour)
 # ---------------------------------------------------------------------------
 st.subheader("Seasonal Heatmap (Month x Hour)")
@@ -166,10 +212,7 @@ if all(c in df.columns for c in ["month", "hour", "catch_count"]):
         .reset_index()
         .pivot(index="hour", columns="month", values="catch_rate")
     )
-    month_labels = {i: m for i, m in enumerate(
-        ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
-    heatmap_data.columns = [month_labels.get(c, c) for c in heatmap_data.columns]
+    heatmap_data.columns = [MONTH_NAMES.get(c, c) for c in heatmap_data.columns]
 
     fig_hm = px.imshow(
         heatmap_data,

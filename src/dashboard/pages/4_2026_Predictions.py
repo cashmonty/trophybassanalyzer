@@ -15,6 +15,7 @@ for candidate in Path(__file__).resolve().parents:
         break
 
 from src.dashboard.ui import (
+    MONTH_NAMES,
     bootstrap_dashboard,
     lake_label,
     render_dataframe,
@@ -72,18 +73,6 @@ st.subheader("Daily Trophy Probability Calendar")
 
 if "max_probability" in lake_pred.columns:
     lake_pred["month"] = lake_pred["date"].dt.month
-    lake_pred["day"] = lake_pred["date"].dt.day
-    lake_pred["week"] = lake_pred["date"].dt.isocalendar().week.astype(int)
-    lake_pred["weekday"] = lake_pred["date"].dt.weekday  # 0=Mon
-
-    # Build month-by-month calendars
-    months = sorted(lake_pred["month"].unique())
-    month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
-                   7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
-
-    # Create a single heatmap using day_of_year
-    lake_pred["day_of_year"] = lake_pred["date"].dt.dayofyear
-    lake_pred["week_of_year"] = lake_pred["date"].dt.isocalendar().week.astype(int)
 
     fig_cal = px.scatter(
         lake_pred,
@@ -137,23 +126,23 @@ if "rating" in pred_df.columns:
     upcoming = lake_pred[lake_pred["date"] >= pd.Timestamp.today().normalize()].sort_values("date").head(30).copy()
 
     def rating_color(rating):
-        rating = str(rating).upper()
-        if rating in ("A", "A+", "EXCELLENT"):
+        rating = str(rating).strip().title()
+        if rating == "Excellent":
             return COLORS["bass_green"]
-        elif rating in ("B", "B+", "GOOD"):
+        elif rating == "Great":
             return COLORS["light_green"]
-        elif rating in ("C", "C+", "FAIR"):
+        elif rating == "Good":
             return COLORS["trophy_gold"]
-        else:
+        elif rating == "Fair":
             return COLORS.get("red", "#e74c3c")
+        else:
+            return COLORS.get("gray", "#95a5a6")
 
     def rating_emoji(rating):
-        rating = str(rating).upper()
-        if rating in ("A", "A+", "EXCELLENT"):
+        rating = str(rating).strip().title()
+        if rating in ("Excellent", "Great"):
             return "GO"
-        elif rating in ("B", "B+", "GOOD"):
-            return "GO"
-        elif rating in ("C", "C+", "FAIR"):
+        elif rating == "Good":
             return "MAYBE"
         else:
             return "NO-GO"
@@ -222,8 +211,6 @@ st.subheader("Monthly Summary of Best Days")
 
 if "max_probability" in pred_df.columns:
     pred_df["month"] = pred_df["date"].dt.month
-    month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
-                   7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
 
     # Count "good" days per month (above median probability)
     threshold = pred_df["max_probability"].median()
@@ -233,7 +220,7 @@ if "max_probability" in pred_df.columns:
         .agg(good_days=("date", "nunique"), avg_probability=("max_probability", "mean"))
         .reset_index()
     )
-    monthly_summary["month_name"] = monthly_summary["month"].map(month_names)
+    monthly_summary["month_name"] = monthly_summary["month"].map(MONTH_NAMES)
 
     fig_month = px.bar(
         monthly_summary,

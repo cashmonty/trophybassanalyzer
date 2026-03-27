@@ -40,11 +40,18 @@ if df is None or df.empty:
 st.subheader("Environmental Conditions Timeline")
 
 condition_cols = {
-    "temperature_2m": "Temperature (C)",
+    "water_temp_f": "Water Temp (F)",
+    "air_temp_f": "Air Temp (F)",
     "pressure_msl": "Pressure (hPa)",
-    "wind_speed_10m": "Wind Speed (m/s)",
+    "wind_speed_10m": "Wind Speed (km/h)",
     "cloud_cover": "Cloud Cover (%)",
+    "gage_height_ft": "Gage Height (ft)",
 }
+# Derive Fahrenheit columns
+if "temperature_2m" in df.columns:
+    df["air_temp_f"] = df["temperature_2m"] * 9 / 5 + 32
+if "water_temp_f" not in df.columns and "water_temp_estimated" in df.columns:
+    df["water_temp_f"] = df["water_temp_estimated"] * 9 / 5 + 32
 available_conds = {k: v for k, v in condition_cols.items() if k in df.columns}
 
 if available_conds and "datetime" in df.columns:
@@ -97,9 +104,10 @@ st.markdown("---")
 st.subheader("Condition Distributions: Trophy vs Non-Trophy")
 
 dist_features = [c for c in [
-    "temperature_2m", "water_temp_estimated", "pressure_msl",
+    "water_temp_f", "air_temp_f", "pressure_msl",
     "wind_speed_10m", "cloud_cover", "moon_illumination",
-    "solunar_base_score", "precipitation",
+    "solunar_base_score", "precipitation", "gage_height_ft",
+    "pressure_trend_3h", "temp_change_3day",
 ] if c in df.columns]
 
 if dist_features and "trophy_caught" in df.columns:
@@ -145,9 +153,10 @@ st.markdown("---")
 st.subheader("Conditions vs Trophy Weight")
 
 scatter_features = [c for c in [
-    "temperature_2m", "water_temp_estimated", "pressure_msl",
+    "water_temp_f", "air_temp_f", "pressure_msl",
     "wind_speed_10m", "cloud_cover", "moon_illumination",
-    "solunar_base_score", "pressure_trend_3h",
+    "solunar_base_score", "pressure_trend_3h", "gage_height_ft",
+    "temp_change_3day", "warming_streak",
 ] if c in df.columns]
 
 if scatter_features and "max_weight" in df.columns:
@@ -158,7 +167,7 @@ if scatter_features and "max_weight" in df.columns:
     with col_right:
         color_by = st.selectbox(
             "Color by",
-            ["lake_key", "spawn_phase", "front_type", "month"],
+            ["lake_key", "spawn_phase", "front_type", "wind_class", "pressure_trend_class", "water_level_trend", "month"],
             key="scatter_color",
         )
         color_by = color_by if color_by in df.columns else None

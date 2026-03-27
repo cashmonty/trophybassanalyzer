@@ -16,7 +16,7 @@ for candidate in Path(__file__).resolve().parents:
         break
 
 from src.analysis.correlations import compute_feature_importance
-from src.dashboard.ui import bootstrap_dashboard, lake_label, render_page_header, render_plotly
+from src.dashboard.ui import MONTH_NAMES, bootstrap_dashboard, lake_label, render_page_header, render_plotly
 
 ctx = bootstrap_dashboard("Lake Detail")
 COLORS = ctx.colors
@@ -35,8 +35,6 @@ lake_configs = ctx.lake_configs
 if df is None or (hasattr(df, "empty") and df.empty):
     st.info("No filtered lake history is available for the current selection.")
     st.stop()
-
-TROPHY_WEIGHT = 7.0
 
 # Lake structure/tips knowledge base
 LAKE_INTEL = {
@@ -269,10 +267,7 @@ with col_left:
             .agg(catches=("catch_count", "sum"), trophies=("trophy_count", "sum"))
             .reset_index()
         )
-        month_names = {i: m for i, m in enumerate(
-            ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
-        monthly["month_name"] = monthly["month"].map(month_names)
+        monthly["month_name"] = monthly["month"].map(MONTH_NAMES)
 
         fig_m = px.bar(
             monthly, x="month_name", y="trophies",
@@ -297,3 +292,46 @@ with col_right:
             labels={"hour": "Hour of Day", "trophies": "Trophy Count"},
         )
         render_plotly(fig_h, height=350)
+
+# ---------------------------------------------------------------------------
+# Water temp and conditions breakdown
+# ---------------------------------------------------------------------------
+col_wt, col_sp = st.columns(2)
+
+with col_wt:
+    st.subheader("Water Temp Distribution")
+    wt_col = "water_temp_f" if "water_temp_f" in lake_df.columns else None
+    if wt_col is None and "water_temp_estimated" in lake_df.columns:
+        lake_df["water_temp_f"] = lake_df["water_temp_estimated"] * 9 / 5 + 32
+        wt_col = "water_temp_f"
+    if wt_col and "trophy_caught" in lake_df.columns:
+        trophy_temps = lake_df[lake_df["trophy_caught"] == 1][wt_col].dropna()
+        all_temps = lake_df[lake_df["catch_count"] > 0][wt_col].dropna()
+        fig_wt = go.Figure()
+        if not all_temps.empty:
+            fig_wt.add_trace(go.Histogram(x=all_temps, name="All catch hours", nbinsx=25,
+                                          marker_color=COLORS["water_blue"], opacity=0.4, histnorm="probability"))
+        if not trophy_temps.empty:
+            fig_wt.add_trace(go.Histogram(x=trophy_temps, name="Trophy hours", nbinsx=15,
+                                          marker_color=COLORS["trophy_gold"], opacity=0.8, histnorm="probability"))
+        fig_wt.update_layout(barmode="overlay", xaxis_title="Water Temp (F)", yaxis_title="Share")
+        render_plotly(fig_wt, height=350)
+    else:
+        st.info("No water temp data for this lake.")
+
+with col_sp:
+    st.subheader("Spawn Phase Breakdown")
+    if {"spawn_phase", "trophy_count"}.issubset(lake_df.columns):
+        sp_data = lake_df.groupby("spawn_phase", observed=True)["trophy_count"].sum().reset_index()
+        sp_data = sp_data[sp_data["trophy_count"] > 0].sort_values("trophy_count", ascending=True)
+        phase_labels = {
+            "PRE_SPAWN": "Pre-spawn", "SPAWN": "Spawn", "POST_SPAWN": "Post-spawn",
+            "SUMMER": "Summer", "FALL": "Fall", "TURNOVER": "Turnover", "WINTER": "Winter",
+        }
+        sp_data["label"] = sp_data["spawn_phase"].map(phase_labels).fillna(sp_data["spawn_phase"])
+        fig_sp = px.bar(sp_data, y="label", x="trophy_count", orientation="h",
+                        color_discrete_sequence=[COLORS["trophy_gold"]],
+                        labels={"trophy_count": "Trophies", "label": ""})
+        render_plotly(fig_sp, height=350)
+    else:
+        st.info("No spawn phase data for this lake.")

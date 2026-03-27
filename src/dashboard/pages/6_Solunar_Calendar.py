@@ -43,9 +43,11 @@ available_years = sorted(df["datetime"].dt.year.unique().tolist()) if "datetime"
 with col_y:
     selected_year = st.selectbox("Year", available_years, index=len(available_years) - 1)
 with col_m:
+    import datetime as _dt
+    _current_month = _dt.date.today().month
     selected_month = st.selectbox("Month", list(range(1, 13)),
                                   format_func=lambda m: calendar.month_name[m],
-                                  index=4)  # Default May (prime bass month)
+                                  index=_current_month - 1)
 
 # Filter to selected month
 if "datetime" in df.columns:
@@ -63,18 +65,27 @@ st.subheader(f"Solunar Calendar - {calendar.month_name[selected_month]} {selecte
 
 if not month_df.empty and "solunar_base_score" in month_df.columns:
     # Aggregate daily solunar scores
+    _agg_dict = {
+        "avg_solunar": ("solunar_base_score", "mean"),
+        "max_solunar": ("solunar_base_score", "max"),
+    }
+    if "moon_illumination" in month_df.columns:
+        _agg_dict["moon_illum"] = ("moon_illumination", "mean")
+    if "moon_phase_name" in month_df.columns:
+        _agg_dict["moon_phase"] = ("moon_phase_name", "first")
+    if "catch_count" in month_df.columns:
+        _agg_dict["catches"] = ("catch_count", "sum")
+    if "trophy_count" in month_df.columns:
+        _agg_dict["trophies"] = ("trophy_count", "sum")
     daily_solunar = (
         month_df.groupby(month_df["datetime"].dt.day)
-        .agg(
-            avg_solunar=("solunar_base_score", "mean"),
-            max_solunar=("solunar_base_score", "max"),
-            moon_illum=("moon_illumination", "mean") if "moon_illumination" in month_df.columns else ("solunar_base_score", "count"),
-            catches=("catch_count", "sum") if "catch_count" in month_df.columns else ("solunar_base_score", "count"),
-            trophies=("trophy_count", "sum") if "trophy_count" in month_df.columns else ("solunar_base_score", "count"),
-        )
+        .agg(**_agg_dict)
         .reset_index()
     )
-    daily_solunar.columns = ["day", "avg_solunar", "max_solunar", "moon_illum", "catches", "trophies"]
+    daily_solunar.rename(columns={"datetime": "day"}, inplace=True)
+    for _col in ["moon_illum", "catches", "trophies", "moon_phase"]:
+        if _col not in daily_solunar.columns:
+            daily_solunar[_col] = 0 if _col != "moon_phase" else ""
 
     # Build calendar grid
     cal = calendar.Calendar(firstweekday=6)  # Sunday start
@@ -103,25 +114,29 @@ if not month_df.empty and "solunar_base_score" in month_df.columns:
                 info = solunar_lookup.get(day, {})
                 score = info.get("avg_solunar", 0)
                 moon = info.get("moon_illum", 0)
+                moon_name = info.get("moon_phase", "")
                 catches = info.get("catches", 0)
                 trophies = info.get("trophies", 0)
 
                 # Color intensity based on solunar score
+                # Palette: sand (#EFE6D6) -> olive (#2F4F34)
                 intensity = min(score / max_score, 1.0) if max_score > 0 else 0
-                r = int(45 + (243 - 45) * (1 - intensity))  # from light to bass_green
-                g = int(80 + (156 - 80) * intensity)
-                b = int(22 + (18 - 22) * intensity)
+                r = int(239 + (47 - 239) * intensity)   # sand -> olive
+                g = int(230 + (79 - 230) * intensity)
+                b = int(214 + (52 - 214) * intensity)
                 bg = f"rgb({r},{g},{b})"
-                text_color = "white" if intensity > 0.4 else "#333"
+                text_color = "white" if intensity > 0.5 else "#333"
 
                 trophy_marker = f"<br><span style='color:{COLORS['trophy_gold']};'>T:{trophies:.0f}</span>" if trophies > 0 else ""
 
+                moon_label = f'<small>{moon_name}</small><br>' if moon_name else ''
                 html += (
                     f'<td style="border:1px solid #ddd; padding:6px; background:{bg}; '
                     f'color:{text_color}; text-align:center; vertical-align:top; min-width:80px;">'
                     f'<strong>{day}</strong><br>'
+                    f'{moon_label}'
                     f'<small>Sol: {score:.1f}</small><br>'
-                    f'<small>Moon: {moon:.0f}%</small>'
+                    f'<small>{moon:.0f}%</small>'
                     f'{trophy_marker}'
                     f'</td>'
                 )
@@ -179,13 +194,18 @@ if not month_df.empty and "moon_illumination" in month_df.columns:
     mid_moon = daily_moon.loc[daily_moon["day"] == mid_day, "illumination"]
     if not mid_moon.empty:
         mid_val = mid_moon.values[0]
-        phase_name = (
-            "New Moon" if mid_val < 5 else
-            "Crescent" if mid_val < 25 else
-            "First/Last Quarter" if mid_val < 60 else
-            "Gibbous" if mid_val < 95 else
-            "Full Moon"
-        )
+        # Use actual moon_phase_name from data if available
+        if "moon_phase_name" in month_df.columns:
+            mid_phases = month_df[month_df["datetime"].dt.day == mid_day]["moon_phase_name"].dropna()
+            phase_name = mid_phases.mode().iloc[0] if not mid_phases.empty else "Unknown"
+        else:
+            phase_name = (
+                "New Moon" if mid_val < 5 else
+                "Crescent" if mid_val < 25 else
+                "First/Last Quarter" if mid_val < 60 else
+                "Gibbous" if mid_val < 95 else
+                "Full Moon"
+            )
         st.metric(f"Mid-Month Phase (Day {mid_day})", f"{phase_name} ({mid_val:.0f}%)")
 else:
     st.info("No moon illumination data available.")

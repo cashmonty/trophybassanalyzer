@@ -51,7 +51,7 @@ def prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     encoded_dfs = []
     cat_encoded_cols = []
     for col in available_cat:
-        dummies = pd.get_dummies(df[col], prefix=col, drop_first=True)
+        dummies = pd.get_dummies(df[col], prefix=col, drop_first=False)
         encoded_dfs.append(dummies)
         cat_encoded_cols.extend(dummies.columns.tolist())
 

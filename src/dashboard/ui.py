@@ -65,23 +65,35 @@ DASHBOARD_MERGED_COLUMNS = (
     "cloud_cover",
     "wind_speed_10m",
     "wind_gusts_10m",
+    "wind_direction_10m",
     "moon_illumination",
     "moon_phase_name",
     "solunar_base_score",
     "hour",
     "month",
     "day_of_year",
-    "is_weekend",
     "water_temp_estimated",
+    "water_temp_c",
+    "water_temp_f",
+    "gage_height_ft",
     "pressure_trend_3h",
     "pressure_trend_6h",
+    "pressure_trend_class",
     "front_type",
+    "days_since_last_front",
     "temp_stability_3day",
     "wind_class",
     "temp_change_3day",
     "is_warming_trend",
+    "warming_streak",
+    "water_level_change_1d",
+    "water_level_trend",
     "hours_to_front",
     "prefrontal_feed_window",
+    "sunrise",
+    "sunset",
+    "daily_temperature_2m_max",
+    "daily_temperature_2m_min",
     "catch_count",
     "max_weight",
     "avg_weight",
@@ -127,7 +139,7 @@ CATEGORY_COLUMNS = {
     "rating",
 }
 
-BOOLEAN_COLUMNS = {"is_weekend", "is_trophy", "is_super_trophy"}
+BOOLEAN_COLUMNS = {"is_trophy", "is_super_trophy"}
 
 
 class DashboardDataError(RuntimeError):
