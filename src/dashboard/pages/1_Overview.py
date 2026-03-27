@@ -14,7 +14,7 @@ for candidate in Path(__file__).resolve().parents:
             sys.path.insert(0, candidate_str)
         break
 
-from src.dashboard.ui import apply_figure_style, bootstrap_dashboard, render_page_header
+from src.dashboard.ui import bootstrap_dashboard, render_page_header, render_plotly
 
 ctx = bootstrap_dashboard("Overview")
 COLORS = ctx.colors
@@ -44,7 +44,7 @@ trophy_rate = (total_trophies / total_catches * 100) if total_catches > 0 else 0
 # Top lake
 top_lake = "N/A"
 if "lake_key" in df.columns and "trophy_count" in df.columns:
-    lake_trophies = df.groupby("lake_key")["trophy_count"].sum()
+    lake_trophies = df.groupby("lake_key", observed=True)["trophy_count"].sum()
     if not lake_trophies.empty:
         top_lake_key = lake_trophies.idxmax()
         top_lake = lake_configs[top_lake_key].name if top_lake_key in lake_configs else top_lake_key
@@ -84,7 +84,7 @@ if "datetime" in df.columns and "trophy_caught" in df.columns:
             title="Trophy Catches Over Time",
             labels={"datetime": "Date", "max_weight": "Weight (lbs)", "lake_key": "Lake"},
         )
-        st.plotly_chart(apply_figure_style(fig, height=450), use_container_width=True)
+        render_plotly(fig, height=450)
     else:
         st.info("No trophy catches in the filtered data.")
 else:
@@ -97,9 +97,9 @@ col_left, col_right = st.columns(2)
 
 with col_left:
     st.subheader("Lake Leaderboard")
-    if "lake_key" in df.columns and "trophy_count" in df.columns:
+    if {"lake_key", "catch_count", "trophy_count"}.issubset(df.columns):
         leaderboard = (
-            df.groupby("lake_key")
+            df.groupby("lake_key", observed=True)
             .agg(
                 total_catches=("catch_count", "sum"),
                 total_trophies=("trophy_count", "sum"),
@@ -119,13 +119,13 @@ with col_left:
             title="Trophies by Lake",
             labels={"total_trophies": "Trophy Count", "lake_name": ""},
         )
-        st.plotly_chart(apply_figure_style(fig_lb, height=350), use_container_width=True)
+        render_plotly(fig_lb, height=350)
     else:
         st.info("No lake data available.")
 
 with col_right:
     st.subheader("Monthly Distribution")
-    if "month" in df.columns and "trophy_count" in df.columns:
+    if {"month", "catch_count", "trophy_count"}.issubset(df.columns):
         monthly = (
             df.groupby("month")
             .agg(total_catches=("catch_count", "sum"), total_trophies=("trophy_count", "sum"))
@@ -150,7 +150,7 @@ with col_right:
             xaxis_title="Month",
             yaxis_title="Count",
         )
-        st.plotly_chart(apply_figure_style(fig_m, height=350), use_container_width=True)
+        render_plotly(fig_m, height=350)
     else:
         st.info("No monthly data available.")
 
@@ -178,6 +178,6 @@ if all(c in df.columns for c in ["month", "hour", "catch_count"]):
         labels=dict(x="Month", y="Hour of Day", color="Avg Catches"),
         aspect="auto",
     )
-    st.plotly_chart(apply_figure_style(fig_hm, height=500), use_container_width=True)
+    render_plotly(fig_hm, height=500)
 else:
     st.info("Heatmap requires month, hour, and catch_count columns.")

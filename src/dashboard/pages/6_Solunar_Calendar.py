@@ -16,7 +16,7 @@ for candidate in Path(__file__).resolve().parents:
             sys.path.insert(0, candidate_str)
         break
 
-from src.dashboard.ui import apply_figure_style, bootstrap_dashboard, render_page_header
+from src.dashboard.ui import bootstrap_dashboard, render_page_header, render_plotly
 
 ctx = bootstrap_dashboard("Solunar Calendar")
 COLORS = ctx.colors
@@ -172,7 +172,7 @@ if not month_df.empty and "moon_illumination" in month_df.columns:
         yaxis_title="Illumination (%)",
         yaxis=dict(range=[0, 105]),
     )
-    st.plotly_chart(apply_figure_style(fig_moon, height=350), use_container_width=True)
+    render_plotly(fig_moon, height=350)
 
     # Gauges for current or mid-month illumination
     mid_day = 15
@@ -232,7 +232,7 @@ if not month_df.empty and "solunar_base_score" in month_df.columns and "hour" in
         yaxis2=dict(title="Trophy Catches", side="right", overlaying="y"),
         legend=dict(x=0.01, y=0.99),
     )
-    st.plotly_chart(apply_figure_style(fig_hourly, height=400), use_container_width=True)
+    render_plotly(fig_hourly, height=400)
 
     # Top 5 best time windows
     top_hours = hourly_solunar.nlargest(5, "avg_solunar")
@@ -267,4 +267,4 @@ if "solunar_base_score" in month_df.columns and "catch_count" in month_df.column
         labels={"solunar_base_score": "Solunar Base Score", "catch_count": "Catch Count",
                 "trophy_caught": "Trophy?"},
     )
-    st.plotly_chart(apply_figure_style(fig_sol, height=400), use_container_width=True)
+    render_plotly(fig_sol, height=400)

@@ -20,7 +20,7 @@ from src.analysis.correlations import (
     compute_conditional_rates,
     generate_insights,
 )
-from src.dashboard.ui import apply_figure_style, bootstrap_dashboard, render_page_header
+from src.dashboard.ui import bootstrap_dashboard, render_dataframe, render_page_header, render_plotly
 
 ctx = bootstrap_dashboard("Correlation Analysis")
 COLORS = ctx.colors
@@ -54,7 +54,7 @@ try:
             title="Feature Correlation Matrix",
             aspect="auto",
         )
-        st.plotly_chart(apply_figure_style(fig_corr, height=700), use_container_width=True)
+        render_plotly(fig_corr, height=700)
     else:
         st.info("Unable to compute correlation matrix with available data.")
 except Exception as e:
@@ -82,15 +82,14 @@ try:
             labels={"abs_correlation": "|Correlation|", "feature": "", "pearson_r": "Direction"},
         )
         fig_imp.update_layout(yaxis=dict(autorange="reversed"))
-        st.plotly_chart(apply_figure_style(fig_imp, height=500), use_container_width=True)
+        render_plotly(fig_imp, height=500)
 
         # Show detail table
         with st.expander("Feature Importance Details"):
-            st.dataframe(
+            render_dataframe(
                 importance[["feature", "pearson_r", "pearson_p", "pointbiserial_r",
                             "ks_statistic", "ks_pvalue", "abs_correlation"]]
                 .round(4),
-                use_container_width=True,
             )
     else:
         st.info("Not enough data to compute feature importance.")
@@ -133,7 +132,7 @@ if cond_features:
                 yaxis_title="Trophy Rate",
                 yaxis_tickformat=".1%",
             )
-            st.plotly_chart(apply_figure_style(fig_rate, height=400), use_container_width=True)
+            render_plotly(fig_rate, height=400)
         else:
             st.info("Not enough data for conditional rate analysis.")
     except Exception as e:

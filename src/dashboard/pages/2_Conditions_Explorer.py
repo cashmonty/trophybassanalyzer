@@ -15,7 +15,7 @@ for candidate in Path(__file__).resolve().parents:
             sys.path.insert(0, candidate_str)
         break
 
-from src.dashboard.ui import apply_figure_style, bootstrap_dashboard, render_page_header
+from src.dashboard.ui import bootstrap_dashboard, render_page_header, render_plotly
 
 ctx = bootstrap_dashboard("Conditions Explorer")
 COLORS = ctx.colors
@@ -85,7 +85,7 @@ if available_conds and "datetime" in df.columns:
                 )
 
     fig.update_layout(title="Conditions with Trophy Catch Overlay")
-    st.plotly_chart(apply_figure_style(fig, height=250 * n_panels), use_container_width=True)
+    render_plotly(fig, height=250 * n_panels)
 else:
     st.info("Insufficient condition columns or datetime column for timeline.")
 
@@ -119,7 +119,7 @@ if dist_features and "trophy_caught" in df.columns:
         title=f"Distribution of {selected_feature}",
         labels={selected_feature: selected_feature, "group": ""},
     )
-    st.plotly_chart(apply_figure_style(fig_dist, height=400), use_container_width=True)
+    render_plotly(fig_dist, height=400)
 
     # Stats comparison
     col1, col2 = st.columns(2)
@@ -178,7 +178,7 @@ if scatter_features and "max_weight" in df.columns:
                                      COLORS["trophy_gold"], "#e74c3c", "#8e44ad",
                                      "#1abc9c", "#d35400"],
         )
-        st.plotly_chart(apply_figure_style(fig_sc, height=500), use_container_width=True)
+        render_plotly(fig_sc, height=500)
     else:
         st.info("No records with valid weight for scatter plot.")
 else:

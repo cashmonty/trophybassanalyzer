@@ -35,7 +35,7 @@ def compute_correlation_matrix(df: pd.DataFrame) -> pd.DataFrame:
 def compute_feature_importance(df: pd.DataFrame, target: str = "trophy_caught") -> pd.DataFrame:
     """Rank features by mutual information and correlation with target."""
     if target not in df.columns:
-        logger.warning(f"Target '{target}' not in dataframe")
+        logger.warning("Target '%s' not in dataframe", target)
         return pd.DataFrame()
 
     feature_cols = [c for c in ANALYSIS_FEATURES if c in df.columns]
@@ -44,6 +44,8 @@ def compute_feature_importance(df: pd.DataFrame, target: str = "trophy_caught") 
     for col in feature_cols:
         valid = df[[col, target]].dropna()
         if len(valid) < 100:
+            continue
+        if valid[col].nunique() < 2 or valid[target].nunique() < 2:
             continue
 
         # Pearson correlation
@@ -77,6 +79,9 @@ def compute_feature_importance(df: pd.DataFrame, target: str = "trophy_caught") 
             "abs_correlation": abs(pearson_r),
         })
 
+    if not results:
+        return pd.DataFrame()
+
     result_df = pd.DataFrame(results).sort_values("abs_correlation", ascending=False)
     return result_df
 
@@ -88,8 +93,14 @@ def compute_conditional_rates(df: pd.DataFrame, feature: str,
     if feature not in df.columns or target not in df.columns:
         return pd.DataFrame()
 
-    valid = df[[feature, target]].dropna()
-    valid["bin"] = pd.qcut(valid[feature], q=n_bins, duplicates="drop")
+    valid = df[[feature, target]].dropna().copy()
+    if len(valid) < 2 or valid[feature].nunique() < 2:
+        return pd.DataFrame()
+
+    try:
+        valid["bin"] = pd.qcut(valid[feature], q=n_bins, duplicates="drop")
+    except ValueError:
+        return pd.DataFrame()
 
     rates = valid.groupby("bin", observed=True).agg(
         count=(target, "count"),

@@ -19,10 +19,11 @@ for candidate in Path(__file__).resolve().parents:
 
 from src.dashboard.ui import (
     MONTH_NAMES,
-    apply_figure_style,
     bootstrap_dashboard,
     lake_label,
+    render_dataframe,
     render_page_header,
+    render_plotly,
 )
 
 TROPHY_WEIGHT = 7.0
@@ -96,7 +97,7 @@ def build_trophy_daily(merged_df: pd.DataFrame) -> pd.DataFrame:
             lambda x: x.mode().iloc[0] if not x.mode().empty else "unknown",
         )
 
-    trophy_daily = trophy_hours.groupby(["date", "lake_key"]).agg(**agg).reset_index()
+    trophy_daily = trophy_hours.groupby(["date", "lake_key"], observed=True).agg(**agg).reset_index()
     trophy_daily["date"] = pd.to_datetime(trophy_daily["date"])
     trophy_daily["month"] = trophy_daily["date"].dt.month
     return trophy_daily
@@ -241,7 +242,7 @@ with tab_patterns:
             )
         )
         fig_month.update_layout(yaxis_title="7+ lb fish")
-        st.plotly_chart(apply_figure_style(fig_month, height=360), use_container_width=True)
+        render_plotly(fig_month, height=360)
 
     with right:
         st.subheader("Moon phase pressure")
@@ -256,7 +257,7 @@ with tab_patterns:
             "Waning Crescent",
         ]
         phase_counts = (
-            trophy_daily.groupby("moon_phase").size().reindex(phase_order, fill_value=0)
+            trophy_daily.groupby("moon_phase", observed=True).size().reindex(phase_order, fill_value=0)
             if not trophy_daily.empty
             else pd.Series(0, index=phase_order)
         )
@@ -270,7 +271,7 @@ with tab_patterns:
             )
         )
         fig_moon.update_layout(yaxis_title="Trophy days")
-        st.plotly_chart(apply_figure_style(fig_moon, height=360), use_container_width=True)
+        render_plotly(fig_moon, height=360)
 
     bottom_left, bottom_right = st.columns(2)
     with bottom_left:
@@ -286,7 +287,11 @@ with tab_patterns:
                 "WINTER": "Winter",
             }
             phase_order = list(phase_labels)
-            phase_counts = trophy_daily.groupby("spawn_phase").size().reindex(phase_order, fill_value=0)
+            phase_counts = (
+                trophy_daily.groupby("spawn_phase", observed=True)
+                .size()
+                .reindex(phase_order, fill_value=0)
+            )
             phase_counts = phase_counts[phase_counts > 0]
             fig_phase = go.Figure(
                 go.Bar(
@@ -306,7 +311,7 @@ with tab_patterns:
                 )
             )
             fig_phase.update_layout(yaxis_title="Trophy days")
-            st.plotly_chart(apply_figure_style(fig_phase, height=360), use_container_width=True)
+            render_plotly(fig_phase, height=360)
         else:
             st.info("No spawn-phase data is available for the current selection.")
 
@@ -314,7 +319,7 @@ with tab_patterns:
         st.subheader("Lake leaderboard")
         if not trophy_catches.empty:
             lake_stats = (
-                trophy_catches.groupby("lake_key")
+                trophy_catches.groupby("lake_key", observed=True)
                 .agg(count=("weight_lbs", "size"), biggest=("weight_lbs", "max"), avg=("weight_lbs", "mean"))
                 .sort_values("count", ascending=True)
                 .reset_index()
@@ -338,7 +343,7 @@ with tab_patterns:
                 )
             )
             fig_lakes.update_layout(xaxis_title="Trophy fish")
-            st.plotly_chart(apply_figure_style(fig_lakes, height=360), use_container_width=True)
+            render_plotly(fig_lakes, height=360)
         else:
             st.info("No trophy catches were found for the active lake selection.")
 
@@ -384,7 +389,7 @@ with tab_conditions:
             xaxis_title="Water temperature (F)",
             yaxis_title="Share of observations",
         )
-        st.plotly_chart(apply_figure_style(fig_temp, height=380), use_container_width=True)
+        render_plotly(fig_temp, height=380)
 
     with right:
         st.subheader("Barometric pressure")
@@ -415,7 +420,7 @@ with tab_conditions:
             xaxis_title="Pressure (inHg)",
             yaxis_title="Share of observations",
         )
-        st.plotly_chart(apply_figure_style(fig_pressure, height=380), use_container_width=True)
+        render_plotly(fig_pressure, height=380)
 
     lower_left, lower_right = st.columns(2)
     with lower_left:
@@ -441,7 +446,7 @@ with tab_conditions:
                 )
             )
             fig_wind.update_layout(yaxis_title="Trophy days")
-            st.plotly_chart(apply_figure_style(fig_wind, height=360), use_container_width=True)
+            render_plotly(fig_wind, height=360)
         else:
             st.info("Wind-class labels are not available for this slice of the data.")
 
@@ -449,20 +454,29 @@ with tab_conditions:
         st.subheader("Weight vs. temperature")
         if not trophy_daily.empty:
             x_col = "water_temp_f" if "water_temp_f" in trophy_daily.columns else "air_temp_f"
-            fig_scatter = px.scatter(
-                trophy_daily,
-                x=x_col,
-                y="max_weight",
-                color="lake_key",
-                size="solunar_score" if "solunar_score" in trophy_daily.columns else None,
-                hover_data=["date", "moon_phase", "pressure_inhg"],
-                labels={
-                    x_col: "Water temp (F)" if x_col == "water_temp_f" else "Air temp (F)",
-                    "max_weight": "Best fish (lbs)",
-                    "lake_key": "Lake",
-                },
-            )
-            st.plotly_chart(apply_figure_style(fig_scatter, height=360), use_container_width=True)
+            scatter_df = trophy_daily.dropna(subset=[x_col, "max_weight"]).copy()
+            size_col = None
+            if "solunar_score" in scatter_df.columns and scatter_df["solunar_score"].notna().any():
+                scatter_df = scatter_df.dropna(subset=["solunar_score"]).copy()
+                size_col = "solunar_score"
+
+            if scatter_df.empty:
+                st.info("No trophy-day condition sample is available for this view.")
+            else:
+                fig_scatter = px.scatter(
+                    scatter_df,
+                    x=x_col,
+                    y="max_weight",
+                    color="lake_key",
+                    size=size_col,
+                    hover_data=["date", "moon_phase", "pressure_inhg"],
+                    labels={
+                        x_col: "Water temp (F)" if x_col == "water_temp_f" else "Air temp (F)",
+                        "max_weight": "Best fish (lbs)",
+                        "lake_key": "Lake",
+                    },
+                )
+                render_plotly(fig_scatter, height=360)
         else:
             st.info("No trophy-day condition sample is available for this view.")
 
@@ -494,14 +508,14 @@ with tab_predictions:
                     hover_data=["rating", "best_hour"],
                 )
                 fig_windows.update_xaxes(tickformat=".0%")
-                st.plotly_chart(apply_figure_style(fig_windows, height=520), use_container_width=True)
+                render_plotly(fig_windows, height=520)
 
             with right:
                 upcoming_table = top_future[
                     ["date_label", "lake_name", "probability_pct", "best_hour", "rating"]
                 ].copy()
                 upcoming_table.columns = ["Date", "Lake", "Prob %", "Best hour", "Grade"]
-                st.dataframe(upcoming_table, use_container_width=True, hide_index=True)
+                render_dataframe(upcoming_table, hide_index=True)
 
             monthly = future_predictions.copy()
             monthly["month"] = monthly["date"].dt.month
@@ -543,7 +557,7 @@ with tab_predictions:
                     "tickformat": ".0%",
                 },
             )
-            st.plotly_chart(apply_figure_style(fig_monthly, height=360), use_container_width=True)
+            render_plotly(fig_monthly, height=360)
 
 with st.expander("Trophy ledger"):
     display_cols = ["date", "lake_key", "weight_lbs"]
@@ -565,7 +579,7 @@ with st.expander("Trophy ledger"):
         },
         inplace=True,
     )
-    st.dataframe(ledger, use_container_width=True, hide_index=True)
+    render_dataframe(ledger, hide_index=True)
 
 st.caption(
     "Data sources: USA Bassin results, Indiana DNR records, Open-Meteo ERA5 reanalysis, USGS water services, and computed solunar timing."

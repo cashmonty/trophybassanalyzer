@@ -15,9 +15,8 @@ for candidate in Path(__file__).resolve().parents:
             sys.path.insert(0, candidate_str)
         break
 
-from src.config import DATA_DIR, load_lakes
 from src.analysis.correlations import compute_feature_importance
-from src.dashboard.ui import apply_figure_style, bootstrap_dashboard, lake_label, render_page_header
+from src.dashboard.ui import bootstrap_dashboard, lake_label, render_page_header, render_plotly
 
 ctx = bootstrap_dashboard("Lake Detail")
 COLORS = ctx.colors
@@ -34,18 +33,8 @@ df = ctx.merged_df
 lake_configs = ctx.lake_configs
 
 if df is None or (hasattr(df, "empty") and df.empty):
-    try:
-        df = pd.read_parquet(DATA_DIR / "processed" / "merged.parquet")
-        df["datetime"] = pd.to_datetime(df["datetime"])
-    except Exception:
-        st.info("No data available. Run the pipeline first.")
-        st.stop()
-
-if not lake_configs:
-    try:
-        lake_configs = {lc.key: lc for lc in load_lakes()}
-    except Exception:
-        pass
+    st.info("No filtered lake history is available for the current selection.")
+    st.stop()
 
 TROPHY_WEIGHT = 7.0
 
@@ -235,7 +224,7 @@ if "datetime" in lake_df.columns and "catch_count" in lake_df.columns:
         xaxis_title="Date",
         yaxis_title="Count",
     )
-    st.plotly_chart(apply_figure_style(fig_timeline, height=400), use_container_width=True)
+    render_plotly(fig_timeline, height=400)
 else:
     st.info("Timeline data not available.")
 
@@ -261,7 +250,7 @@ try:
             labels={"abs_correlation": "|Correlation|", "feature": "", "pearson_r": "Direction"},
         )
         fig_imp.update_layout(yaxis=dict(autorange="reversed"))
-        st.plotly_chart(apply_figure_style(fig_imp, height=400), use_container_width=True)
+        render_plotly(fig_imp, height=400)
     else:
         st.info("Not enough data for lake-specific feature importance.")
 except Exception as e:
@@ -274,7 +263,7 @@ col_left, col_right = st.columns(2)
 
 with col_left:
     st.subheader("Monthly Pattern")
-    if "month" in lake_df.columns and "catch_count" in lake_df.columns:
+    if {"month", "catch_count", "trophy_count"}.issubset(lake_df.columns):
         monthly = (
             lake_df.groupby("month")
             .agg(catches=("catch_count", "sum"), trophies=("trophy_count", "sum"))
@@ -291,11 +280,11 @@ with col_left:
             title="Trophies by Month",
             labels={"month_name": "Month", "trophies": "Trophy Count"},
         )
-        st.plotly_chart(apply_figure_style(fig_m, height=350), use_container_width=True)
+        render_plotly(fig_m, height=350)
 
 with col_right:
     st.subheader("Hourly Pattern")
-    if "hour" in lake_df.columns and "catch_count" in lake_df.columns:
+    if {"hour", "catch_count", "trophy_count"}.issubset(lake_df.columns):
         hourly = (
             lake_df.groupby("hour")
             .agg(catches=("catch_count", "sum"), trophies=("trophy_count", "sum"))
@@ -307,4 +296,4 @@ with col_right:
             title="Trophies by Hour",
             labels={"hour": "Hour of Day", "trophies": "Trophy Count"},
         )
-        st.plotly_chart(apply_figure_style(fig_h, height=350), use_container_width=True)
+        render_plotly(fig_h, height=350)

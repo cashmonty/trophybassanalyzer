@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
+import pyarrow.parquet as pq
 import streamlit as st
 
 from src.config import DATA_DIR, LakeConfig, Settings, load_lakes, load_settings
@@ -48,6 +50,89 @@ SPECIAL_LAKE_LABELS = {
     "multi": "Multi-Lake Events",
 }
 
+REQUIRED_MERGED_COLUMNS = {"datetime", "lake_key"}
+REQUIRED_CATCH_COLUMNS = {"date", "lake_key", "weight_lbs"}
+REQUIRED_PREDICTION_COLUMNS = {"date", "lake_key", "max_probability", "rating"}
+
+DASHBOARD_MERGED_COLUMNS = (
+    "datetime",
+    "date",
+    "lake_key",
+    "temperature_2m",
+    "relative_humidity_2m",
+    "precipitation",
+    "pressure_msl",
+    "cloud_cover",
+    "wind_speed_10m",
+    "wind_gusts_10m",
+    "moon_illumination",
+    "moon_phase_name",
+    "solunar_base_score",
+    "hour",
+    "month",
+    "day_of_year",
+    "is_weekend",
+    "water_temp_estimated",
+    "pressure_trend_3h",
+    "pressure_trend_6h",
+    "front_type",
+    "temp_stability_3day",
+    "wind_class",
+    "temp_change_3day",
+    "is_warming_trend",
+    "hours_to_front",
+    "prefrontal_feed_window",
+    "catch_count",
+    "max_weight",
+    "avg_weight",
+    "trophy_count",
+    "super_trophy_count",
+    "trophy_caught",
+    "spawn_phase",
+)
+
+DASHBOARD_CATCH_COLUMNS = (
+    "date",
+    "lake_key",
+    "weight_lbs",
+    "length_in",
+    "angler",
+    "place",
+    "is_trophy",
+    "is_super_trophy",
+    "source_type",
+    "season_start_year",
+)
+
+DASHBOARD_PREDICTION_COLUMNS = (
+    "date",
+    "lake_key",
+    "max_score",
+    "mean_score",
+    "best_hour",
+    "max_probability",
+    "mean_probability",
+    "moon_phase_name",
+    "rating",
+)
+
+CATEGORY_COLUMNS = {
+    "lake_key",
+    "moon_phase_name",
+    "front_type",
+    "wind_class",
+    "spawn_phase",
+    "angler",
+    "source_type",
+    "rating",
+}
+
+BOOLEAN_COLUMNS = {"is_weekend", "is_trophy", "is_super_trophy"}
+
+
+class DashboardDataError(RuntimeError):
+    """Raised when dashboard assets are missing or invalid."""
+
 
 @dataclass
 class DashboardContext:
@@ -60,31 +145,101 @@ class DashboardContext:
     colors: dict[str, str]
 
 
-@st.cache_data(show_spinner=False)
+def _read_parquet_checked(
+    path: Path, label: str, *, columns: tuple[str, ...] | list[str] | None = None
+) -> pd.DataFrame:
+    """Read a parquet file and convert low-level failures into dashboard-facing errors."""
+    if not path.exists():
+        raise DashboardDataError(f"Missing required dashboard data file: `{path.as_posix()}`.")
+    selected_columns = None
+    if columns is not None:
+        try:
+            available_columns = set(pq.ParquetFile(path).schema.names)
+        except Exception as exc:  # pragma: no cover - depends on local parquet engine/runtime
+            raise DashboardDataError(
+                f"Unable to inspect columns for {label} from `{path.as_posix()}`. {exc}"
+            ) from exc
+        selected_columns = [column for column in columns if column in available_columns]
+    try:
+        return pd.read_parquet(path, columns=selected_columns)
+    except Exception as exc:  # pragma: no cover - depends on local parquet engine/runtime
+        raise DashboardDataError(
+            f"Unable to read {label} from `{path.as_posix()}`. {exc}"
+        ) from exc
+
+
+def _require_columns(df: pd.DataFrame, label: str, required: set[str]) -> None:
+    """Validate that a dataframe contains the columns the dashboard expects."""
+    missing = sorted(required - set(df.columns))
+    if missing:
+        joined = ", ".join(missing)
+        raise DashboardDataError(f"{label} is missing required columns: {joined}.")
+
+
+def _optimize_dashboard_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Shrink dashboard dataframes so Streamlit sessions stay within memory limits."""
+    for column in ("datetime", "date"):
+        if column in df.columns:
+            df[column] = pd.to_datetime(df[column])
+
+    for column in CATEGORY_COLUMNS.intersection(df.columns):
+        df[column] = df[column].astype("category")
+
+    for column in BOOLEAN_COLUMNS.intersection(df.columns):
+        if pd.api.types.is_bool_dtype(df[column]):
+            continue
+        if df[column].dropna().isin([0, 1, True, False]).all():
+            df[column] = df[column].astype("bool")
+
+    float_columns = df.select_dtypes(include=["float64"]).columns
+    for column in float_columns:
+        df[column] = pd.to_numeric(df[column], downcast="float")
+
+    integer_columns = df.select_dtypes(include=["int64", "int32"]).columns
+    for column in integer_columns:
+        df[column] = pd.to_numeric(df[column], downcast="integer")
+
+    return df
+
+
+@st.cache_resource(show_spinner=False)
 def load_dashboard_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load the main historical merged and catch datasets."""
-    merged = pd.read_parquet(DATA_DIR / "processed" / "merged.parquet").copy()
-    merged["datetime"] = pd.to_datetime(merged["datetime"])
-    if "date" in merged.columns:
-        merged["date"] = pd.to_datetime(merged["date"])
+    merged = _read_parquet_checked(
+        DATA_DIR / "processed" / "merged.parquet",
+        "merged history",
+        columns=DASHBOARD_MERGED_COLUMNS,
+    )
+    _require_columns(merged, "Merged history", REQUIRED_MERGED_COLUMNS)
+    merged = _optimize_dashboard_frame(merged)
+    if "date" not in merged.columns:
+        merged["date"] = merged["datetime"].dt.normalize()
 
-    catches = pd.read_parquet(DATA_DIR / "processed" / "catches.parquet").copy()
+    catches = _read_parquet_checked(
+        DATA_DIR / "processed" / "catches.parquet",
+        "catch ledger",
+        columns=DASHBOARD_CATCH_COLUMNS,
+    )
+    _require_columns(catches, "Catch ledger", REQUIRED_CATCH_COLUMNS)
     catches["date"] = pd.to_datetime(catches["date"])
+    catches["weight_lbs"] = pd.to_numeric(catches["weight_lbs"], errors="coerce")
     catches = catches[catches["weight_lbs"].between(0, 20, inclusive="both")]
+    catches = _optimize_dashboard_frame(catches)
 
     return merged, catches
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def load_dashboard_predictions() -> pd.DataFrame | None:
     """Load the generated 2026 daily predictions when available."""
     path = DATA_DIR / "processed" / "predictions_2026.parquet"
     if not path.exists():
         return None
 
-    df = pd.read_parquet(path).copy()
+    df = _read_parquet_checked(path, "2026 prediction windows", columns=DASHBOARD_PREDICTION_COLUMNS)
+    _require_columns(df, "2026 prediction windows", REQUIRED_PREDICTION_COLUMNS)
     df["date"] = pd.to_datetime(df["date"])
-    return df
+    return _optimize_dashboard_frame(df)
 
 
 def lake_label(lake_key: str, lake_configs: dict[str, LakeConfig]) -> str:
@@ -116,6 +271,25 @@ def apply_figure_style(fig: go.Figure, *, height: int | None = None) -> go.Figur
     if height:
         fig.update_layout(height=height)
     return fig
+
+
+def render_plotly(fig: go.Figure, *, height: int | None = None) -> None:
+    """Render a Plotly figure with the dashboard defaults."""
+    styled = apply_figure_style(fig, height=height)
+    try:
+        st.plotly_chart(styled, width="stretch")
+    except TypeError:  # pragma: no cover - compatibility with older Streamlit releases
+        st.plotly_chart(styled, use_container_width=True)
+
+
+def render_dataframe(
+    data: pd.DataFrame | pd.io.formats.style.Styler, *, hide_index: bool = False
+) -> None:
+    """Render a dataframe with the dashboard defaults."""
+    try:
+        st.dataframe(data, width="stretch", hide_index=hide_index)
+    except TypeError:  # pragma: no cover - compatibility with older Streamlit releases
+        st.dataframe(data, use_container_width=True)
 
 
 def render_page_header(title: str, subtitle: str, eyebrow: str | None = None) -> None:
@@ -327,6 +501,12 @@ def _filter_catches(
     if "lake_key" not in catches_df.columns:
         return catches_df.copy()
 
+    if not selected_lakes:
+        return catches_df.copy()
+
+    if set(selected_lakes) == set(catches_df["lake_key"].dropna().unique()) and include_multi:
+        return catches_df
+
     mask = catches_df["lake_key"].isin(selected_lakes)
     if include_multi:
         mask |= catches_df["lake_key"].eq("multi")
@@ -389,6 +569,32 @@ def _render_sidebar(
     return selected_lakes
 
 
+def _filter_merged(merged_df: pd.DataFrame, selected_lakes: list[str]) -> pd.DataFrame:
+    if "lake_key" not in merged_df.columns or not selected_lakes:
+        return merged_df.copy()
+
+    all_lakes = set(merged_df["lake_key"].dropna().unique())
+    if set(selected_lakes) == all_lakes:
+        return merged_df
+
+    return merged_df[merged_df["lake_key"].isin(selected_lakes)].copy()
+
+
+def _filter_predictions(
+    predictions_df: pd.DataFrame | None, selected_lakes: list[str]
+) -> pd.DataFrame | None:
+    if predictions_df is None:
+        return None
+    if "lake_key" not in predictions_df.columns or not selected_lakes:
+        return predictions_df.copy()
+
+    all_lakes = set(predictions_df["lake_key"].dropna().unique())
+    if set(selected_lakes) == all_lakes:
+        return predictions_df
+
+    return predictions_df[predictions_df["lake_key"].isin(selected_lakes)].copy()
+
+
 def bootstrap_dashboard(page_title: str) -> DashboardContext:
     """Configure the current page and expose filtered dashboard state."""
     st.set_page_config(
@@ -401,21 +607,24 @@ def bootstrap_dashboard(page_title: str) -> DashboardContext:
     _register_plotly_template()
     _inject_global_styles()
 
-    merged_df, catches_df = load_dashboard_data()
-    predictions_df = load_dashboard_predictions()
-    settings = load_settings()
-    lake_configs = {lake.key: lake for lake in load_lakes()}
+    try:
+        merged_df, catches_df = load_dashboard_data()
+        predictions_df = load_dashboard_predictions()
+        settings = load_settings()
+        lake_configs = {lake.key: lake for lake in load_lakes()}
+    except DashboardDataError as exc:
+        st.error(str(exc))
+        st.stop()
+    except Exception as exc:  # pragma: no cover - defensive UI stop
+        st.error(f"Dashboard bootstrap failed: {exc}")
+        st.stop()
 
     selected_lakes = _render_sidebar(merged_df, catches_df, predictions_df, lake_configs)
-    include_multi = len(selected_lakes) == merged_df["lake_key"].nunique()
+    include_multi = set(selected_lakes) == set(merged_df["lake_key"].dropna().unique())
 
-    filtered_merged = merged_df[merged_df["lake_key"].isin(selected_lakes)].copy()
+    filtered_merged = _filter_merged(merged_df, selected_lakes)
     filtered_catches = _filter_catches(catches_df, selected_lakes, include_multi)
-    filtered_predictions = None
-    if predictions_df is not None:
-        filtered_predictions = predictions_df[predictions_df["lake_key"].isin(selected_lakes)].copy()
-
-    st.session_state["colors"] = {
+    colors = {
         "bass_green": PALETTE["olive"],
         "water_blue": PALETTE["water"],
         "trophy_gold": PALETTE["gold"],
@@ -423,11 +632,7 @@ def bootstrap_dashboard(page_title: str) -> DashboardContext:
         "moss": PALETTE["moss"],
         "fog": PALETTE["fog"],
     }
-    st.session_state["lake_configs"] = lake_configs
-    st.session_state["merged_df"] = filtered_merged
-    st.session_state["catches_df"] = filtered_catches
-    st.session_state["predictions_df"] = filtered_predictions
-    st.session_state["settings"] = settings
+    filtered_predictions = _filter_predictions(predictions_df, selected_lakes)
 
     return DashboardContext(
         merged_df=filtered_merged,
@@ -436,5 +641,5 @@ def bootstrap_dashboard(page_title: str) -> DashboardContext:
         lake_configs=lake_configs,
         settings=settings,
         selected_lakes=selected_lakes,
-        colors=st.session_state["colors"],
+        colors=colors,
     )

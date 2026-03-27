@@ -15,10 +15,11 @@ for candidate in Path(__file__).resolve().parents:
         break
 
 from src.dashboard.ui import (
-    apply_figure_style,
     bootstrap_dashboard,
     lake_label,
+    render_dataframe,
     render_page_header,
+    render_plotly,
 )
 
 ctx = bootstrap_dashboard("2026 Predictions")
@@ -95,7 +96,7 @@ if "max_probability" in lake_pred.columns:
         labels={"date": "Date", "max_probability": "Probability"},
         hover_data=["best_hour", "rating"] if "best_hour" in lake_pred.columns else None,
     )
-    st.plotly_chart(apply_figure_style(fig_cal, height=400), use_container_width=True)
+    render_plotly(fig_cal, height=400)
 else:
     st.info("Probability column not found in predictions.")
 
@@ -121,7 +122,7 @@ if display_cols:
         styled_df["max_probability"] = styled_df["max_probability"].map("{:.1%}".format)
     if "mean_probability" in styled_df.columns:
         styled_df["mean_probability"] = styled_df["mean_probability"].map("{:.1%}".format)
-    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+    render_dataframe(styled_df, hide_index=True)
 else:
     st.info("Unable to display top windows -- columns missing.")
 
@@ -243,6 +244,6 @@ if "max_probability" in pred_df.columns:
         title="Above-Average Days per Month (All Selected Lakes)",
         labels={"good_days": "Good Days", "month_name": "Month", "avg_probability": "Avg Prob"},
     )
-    st.plotly_chart(apply_figure_style(fig_month, height=400), use_container_width=True)
+    render_plotly(fig_month, height=400)
 else:
     st.info("Probability data not available for monthly summary.")
