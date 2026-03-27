@@ -23,6 +23,8 @@ data/processed/*
 !data/processed/merged.parquet
 !data/processed/predictions_2026.parquet
 !data/processed/predictions_2026_hourly.parquet
+!data/processed/live_forecast_daily.parquet
+!data/processed/live_forecast_hourly.parquet
 
 # IDE
 .vscode/
