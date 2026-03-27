@@ -391,6 +391,145 @@ def get_ml_predictions(df: pd.DataFrame) -> pd.Series | None:
 
 
 # ---------------------------------------------------------------------------
+# Historical pattern analysis
+# ---------------------------------------------------------------------------
+
+def load_historical_profiles() -> dict:
+    """Load historical data and compute per-lake trophy profiles.
+
+    Returns a dict with:
+        lake_trophy_rates: {lake_key: trophies_per_year}
+        lake_trophy_counts: {lake_key: total_trophies}
+        optimal_water_temp_f: (min, peak, max) from historical trophy catches
+        best_moon_phases: list of moon phases ranked by trophy frequency
+        best_spawn_phases: list of spawn phases ranked by trophy frequency
+        best_wind_classes: list of wind classes ranked by trophy frequency
+    """
+    profiles = {
+        "lake_trophy_rates": {},
+        "lake_trophy_counts": {},
+        "optimal_water_temp_f": (48, 62, 78),  # defaults
+        "best_moon_phases": [],
+        "best_spawn_phases": [],
+        "best_wind_classes": [],
+    }
+
+    try:
+        catches_path = DATA_DIR / "processed" / "catches.parquet"
+        merged_path = DATA_DIR / "processed" / "merged.parquet"
+
+        if not catches_path.exists() or not merged_path.exists():
+            return profiles
+
+        catches = pd.read_parquet(catches_path)
+        catches["date"] = pd.to_datetime(catches["date"])
+        trophy_catches = catches[catches["weight_lbs"] >= 7.0]
+
+        # Per-lake trophy counts
+        lake_counts = trophy_catches.groupby("lake_key").size().to_dict()
+        profiles["lake_trophy_counts"] = lake_counts
+
+        # Trophy rate: trophies per year per lake
+        if len(catches) > 0:
+            years = (catches["date"].max() - catches["date"].min()).days / 365.25
+            years = max(years, 1)
+            for lake_key, count in lake_counts.items():
+                profiles["lake_trophy_rates"][lake_key] = count / years
+
+        # Load merged for condition analysis
+        merged = pd.read_parquet(merged_path, columns=[
+            "lake_key", "max_weight", "water_temp_estimated",
+            "moon_phase_name", "spawn_phase", "wind_class",
+            "pressure_trend_class",
+        ])
+        trophy_hours = merged[merged["max_weight"] >= 7.0]
+
+        if len(trophy_hours) == 0:
+            return profiles
+
+        # Optimal water temp range from actual trophy catches
+        if "water_temp_estimated" in trophy_hours.columns:
+            wt = trophy_hours["water_temp_estimated"].dropna()
+            if len(wt) > 0:
+                wt_f = wt * 9 / 5 + 32
+                profiles["optimal_water_temp_f"] = (
+                    float(wt_f.quantile(0.1)),
+                    float(wt_f.median()),
+                    float(wt_f.quantile(0.9)),
+                )
+
+        # Best moon phases (ranked by frequency)
+        if "moon_phase_name" in trophy_hours.columns:
+            moon_counts = trophy_hours["moon_phase_name"].value_counts()
+            profiles["best_moon_phases"] = moon_counts.index.tolist()
+
+        # Best spawn phases
+        if "spawn_phase" in trophy_hours.columns:
+            phase_counts = trophy_hours["spawn_phase"].value_counts()
+            profiles["best_spawn_phases"] = phase_counts.index.tolist()
+
+        # Best wind classes
+        if "wind_class" in trophy_hours.columns:
+            wind_counts = trophy_hours["wind_class"].value_counts()
+            profiles["best_wind_classes"] = wind_counts.index.tolist()
+
+        logger.info(f"  Historical profiles loaded: {sum(lake_counts.values())} total trophies across {len(lake_counts)} lakes")
+        logger.info(f"  Optimal water temp: {profiles['optimal_water_temp_f'][0]:.0f}-{profiles['optimal_water_temp_f'][2]:.0f}F (peak {profiles['optimal_water_temp_f'][1]:.0f}F)")
+
+    except Exception as e:
+        logger.warning(f"  Could not load historical profiles: {e}")
+
+    return profiles
+
+
+def _score_historical_match(row: pd.Series, profiles: dict) -> float:
+    """Score based on how well current conditions match historical trophy patterns (0-10 points).
+
+    Compares forecast conditions against the actual conditions when trophies
+    were caught historically at each lake.
+    """
+    score = 0.0
+
+    # Lake trophy track record (0-3 pts)
+    lake_key = row.get("lake_key", "")
+    trophy_count = profiles.get("lake_trophy_counts", {}).get(lake_key, 0)
+    if trophy_count >= 15:
+        score += 3.0  # Proven trophy producer
+    elif trophy_count >= 8:
+        score += 2.0
+    elif trophy_count >= 3:
+        score += 1.0
+
+    # Water temp in historical optimal zone (0-3 pts)
+    temp_f = row.get("water_temp_f_est")
+    if not pd.isna(temp_f):
+        opt_min, opt_peak, opt_max = profiles.get("optimal_water_temp_f", (48, 62, 78))
+        if opt_min <= temp_f <= opt_max:
+            # Closer to peak = higher score
+            dist_from_peak = abs(temp_f - opt_peak)
+            half_range = (opt_max - opt_min) / 2
+            score += 3.0 * max(0, 1 - dist_from_peak / half_range)
+
+    # Moon phase match (0-2 pts)
+    moon = row.get("moon_phase_name", "")
+    best_moons = profiles.get("best_moon_phases", [])
+    if moon in best_moons[:3]:
+        score += 2.0
+    elif moon in best_moons[:5]:
+        score += 1.0
+
+    # Spawn phase match (0-2 pts)
+    phase = row.get("spawn_phase", "")
+    best_phases = profiles.get("best_spawn_phases", [])
+    if phase in best_phases[:2]:
+        score += 2.0
+    elif phase in best_phases[:4]:
+        score += 1.0
+
+    return min(score, 10.0)
+
+
+# ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
@@ -465,22 +604,24 @@ def _score_water_level(trend: str, change: float) -> float:
     return 3.0  # unknown
 
 
-def compute_trophy_score_full(row: pd.Series, ml_pred: float | None = None) -> float:
+def compute_trophy_score_full(row: pd.Series, ml_pred: float | None = None,
+                              profiles: dict | None = None) -> float:
     """Compute composite trophy bass score (0-100) using ALL available data.
 
     Scoring breakdown (max 100):
-        Water temp:      0-20 pts  (pre-spawn sweet spot)
-        Season:          0-12 pts  (timing)
-        Spawn phase:     0-8 pts   (biological state)
-        Solunar:         0-10 pts  (moon/tidal)
-        Pressure trend:  0-8 pts   (frontal systems)
-        Frontal activity:0-7 pts   (pre-frontal = money)
-        Wind:            0-8 pts   (direction + speed)
-        Cloud cover:     0-5 pts   (overcast better)
-        Time of day:     0-8 pts   (dawn/dusk prime)
-        Warming trend:   0-5 pts   (consecutive warm days)
-        Water level:     0-4 pts   (rising = feeding trigger)
-        ML model boost:  0-5 pts   (historical pattern match)
+        Water temp:        0-18 pts  (pre-spawn sweet spot)
+        Season:            0-10 pts  (timing)
+        Spawn phase:       0-8 pts   (biological state)
+        Solunar:           0-8 pts   (moon/tidal)
+        Pressure trend:    0-7 pts   (frontal systems)
+        Frontal activity:  0-7 pts   (pre-frontal = money)
+        Wind:              0-7 pts   (direction + speed)
+        Cloud cover:       0-5 pts   (overcast better)
+        Time of day:       0-8 pts   (dawn/dusk prime)
+        Warming trend:     0-5 pts   (consecutive warm days)
+        Water level:       0-4 pts   (rising = feeding trigger)
+        Historical match:  0-10 pts  (how well conditions match actual trophy history)
+        ML model boost:    0-3 pts   (trained model pattern match)
     """
     temp_f = row.get("water_temp_f_est")
     if pd.isna(temp_f) and "water_temp_estimated" in row.index:
@@ -488,31 +629,35 @@ def compute_trophy_score_full(row: pd.Series, ml_pred: float | None = None) -> f
         temp_f = temp_c * 9 / 5 + 32 if not pd.isna(temp_c) else None
 
     score = 0.0
-    score += _score_water_temp(temp_f) * (20 / 25)                               # 0-20
-    score += _score_season(row.get("month", 1), row.get("day_of_year", 1)) * 0.6  # 0-12
+    score += _score_water_temp(temp_f) * (18 / 25)                               # 0-18
+    score += _score_season(row.get("month", 1), row.get("day_of_year", 1)) * 0.5  # 0-10
     score += _score_spawn_phase(row.get("spawn_phase", "UNKNOWN"))                 # 0-8
-    score += _score_solunar(row.get("solunar_base_score")) * 0.5                   # 0-10
+    score += _score_solunar(row.get("solunar_base_score")) * 0.4                   # 0-8
     score += _score_pressure(
-        row.get("pressure_msl"), row.get("pressure_trend_3h")) * (8 / 15)         # 0-8
+        row.get("pressure_msl"), row.get("pressure_trend_3h")) * (7 / 15)         # 0-7
     score += _score_frontal_activity(
         row.get("front_type", "stable"),
         row.get("prefrontal_feed_window", 0),
         row.get("hours_to_front", 0))                                               # 0-7
     score += _score_wind(
-        row.get("wind_speed_10m"), row.get("wind_class", "unknown")) * 0.8         # 0-8
+        row.get("wind_speed_10m"), row.get("wind_class", "unknown")) * 0.7         # 0-7
     score += _score_cloud_cover(row.get("cloud_cover")) * 0.5                      # 0-5
     score += _score_time_of_day(int(row.get("hour", 12))) * 0.8                   # 0-8
     score += _score_warming_trend(
         row.get("is_warming_trend", 0), row.get("warming_streak", 0))             # 0-5
     score += _score_water_level(
         row.get("water_level_trend", "unknown"),
-        row.get("water_level_change_1d", 0))                                       # 0-4 (capped)
-    score = min(score, 95.0)  # Cap heuristic at 95
+        row.get("water_level_change_1d", 0))                                       # 0-4
 
-    # ML model boost (up to 5 additional points)
+    # Historical pattern match (up to 10 points from actual trophy data)
+    if profiles:
+        score += _score_historical_match(row, profiles)                            # 0-10
+
+    score = min(score, 97.0)  # Cap heuristic at 97
+
+    # ML model boost (up to 3 additional points)
     if ml_pred is not None and not np.isnan(ml_pred):
-        # ML pred is 0-1 probability; scale to 0-5 bonus
-        score += min(ml_pred * 50, 5.0)
+        score += min(ml_pred * 30, 3.0)
 
     return min(score, 100.0)
 
@@ -528,7 +673,11 @@ def generate_live_forecast() -> pd.DataFrame:
     end_date = today + timedelta(days=6)
 
     logger.info(f"Generating live 7-day forecast: {today} to {end_date}")
-    logger.info("Data sources: Open-Meteo forecast, USGS live water, ephem solunar, feature pipeline, LightGBM model")
+    logger.info("Data sources: Open-Meteo forecast, USGS live water, ephem solunar, feature pipeline, historical patterns, LightGBM model")
+
+    # Load historical trophy profiles from all dashboard data
+    logger.info("Loading historical trophy profiles from 15 years of data...")
+    profiles = load_historical_profiles()
 
     all_lake_forecasts = []
 
@@ -601,11 +750,11 @@ def generate_live_forecast() -> pd.DataFrame:
         if ml_preds is not None:
             weather_df["ml_prediction"] = ml_preds.values
             weather_df["trophy_score"] = weather_df.apply(
-                lambda row: compute_trophy_score_full(row, row.get("ml_prediction")), axis=1
+                lambda row: compute_trophy_score_full(row, row.get("ml_prediction"), profiles), axis=1
             )
         else:
             weather_df["trophy_score"] = weather_df.apply(
-                lambda row: compute_trophy_score_full(row), axis=1
+                lambda row: compute_trophy_score_full(row, profiles=profiles), axis=1
             )
 
         all_lake_forecasts.append(weather_df)

@@ -341,7 +341,7 @@ with tab_thisweek:
                                     {day_name}
                                 </strong>
                                 <span style="margin-left: 1rem; color: #666;">
-                                    Moon: {moon} ({moon_illum*100:.0f}%)
+                                    Moon: {moon} ({moon_illum*100:.0f}%) | Phase: {day_data.iloc[0].get("spawn_phase", "")}
                                 </span>
                             </div>
                             <div style="font-family: Rockwell, Georgia, serif; font-size: 1.3rem; color: {score_color};">
